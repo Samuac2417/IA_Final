@@ -7,4 +7,4 @@ dependen de ``core.models`` / ``core.knowledge_base``. Importe el coordinador
 explícitamente con ``from core.coordinator import ConsensusCoordinator``.
 """
 
-__all__ = ["models", "knowledge_base", "coordinator"]
+__all__ = ["models", "knowledge_base", "coordinator", "nlg_generator"]

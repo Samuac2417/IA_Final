@@ -20,9 +20,9 @@ constituyen una calibración clínica validada y no deben usarse con pacientes r
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
-from core.models import ModoEtico, Paciente, RecursoHospitalario
+from core.models import EvolucionPaciente, ModoEtico, Paciente, RecursoHospitalario
 
 # ---------------------------------------------------------------------------
 # 1. Umbrales clínicos
@@ -64,6 +64,135 @@ def clasificar_triage_urgencias(sat_o2: float, glasgow: int, pafi: int, requiere
     if sat_o2 < 95:
         return "Triage III · AMARILLO · Urgente"
     return "Triage IV · VERDE · Menos urgente"
+
+
+# ---------------------------------------------------------------------------
+# Score NEWS2 (National Early Warning Score 2 · Royal College of Physicians 2017)
+# ---------------------------------------------------------------------------
+def calcular_news2(paciente: Paciente) -> Tuple[int, str, str]:
+    """Calcula el score NEWS2 y su estratificación de riesgo según el Royal College of Physicians (2017).
+
+    Parámetros fisiológicos evaluados:
+        1. Frecuencia respiratoria (rpm)
+        2. Saturación de oxígeno (SpO2 Escala 1 general, %)
+        3. Oxígeno suplementario (Sí / No)
+        4. Presión arterial sistólica (mmHg)
+        5. Frecuencia cardíaca (lpm)
+        6. Nivel de conciencia (escala ACVPU)
+        7. Temperatura corporal (°C)
+
+    Puntuaciones por parámetro (0 a 3):
+        - Frecuencia respiratoria:
+            <= 8: 3 | 9-11: 1 | 12-20: 0 | 21-24: 2 | >= 25: 3
+        - Saturación SpO2:
+            <= 91: 3 | 92-93: 2 | 94-95: 1 | >= 96: 0
+        - Oxígeno suplementario:
+            No: 0 | Sí: 2
+        - Presión sistólica:
+            <= 90: 3 | 91-100: 2 | 101-110: 1 | 111-219: 0 | >= 220: 3
+        - Frecuencia cardíaca:
+            <= 40: 3 | 41-50: 1 | 51-90: 0 | 91-110: 1 | 111-130: 2 | >= 131: 3
+        - Nivel de conciencia (ACVPU):
+            A (Alerta): 0 | C (Confusión), V (Voz), P (Dolor), U (Inconsciente): 3
+        - Temperatura:
+            <= 35.0: 3 | 35.1-36.0: 1 | 36.1-38.0: 0 | 38.1-39.0: 1 | >= 39.1: 2
+
+    Estratificación y respuesta clínica:
+        - Score 0-4: Riesgo Bajo (monitoreo de enfermería en sala general).
+        - Score 5-6 o parámetro en 3 (Score rojo): Riesgo Medio (respuesta urgente por médico de piso).
+        - Score >= 7: Riesgo Alto / Emergencia (evaluación crítica inmediata y consideración de UCI).
+
+    Retorna:
+        Tuple[int, str, str]: (score_total, nivel_riesgo, respuesta_clinica)
+    """
+    scores: List[int] = []
+
+    # 1. Frecuencia respiratoria
+    fr = paciente.frecuencia_respiratoria
+    if fr <= 8:
+        scores.append(3)
+    elif 9 <= fr <= 11:
+        scores.append(1)
+    elif 12 <= fr <= 20:
+        scores.append(0)
+    elif 21 <= fr <= 24:
+        scores.append(2)
+    else:  # >= 25
+        scores.append(3)
+
+    # 2. Saturación de oxígeno (Escala 1 general)
+    sat = paciente.sat_o2
+    if sat <= 91.0:
+        scores.append(3)
+    elif 92.0 <= sat <= 93.0:
+        scores.append(2)
+    elif 94.0 <= sat <= 95.0:
+        scores.append(1)
+    else:  # >= 96.0
+        scores.append(0)
+
+    # 3. Oxígeno suplementario
+    scores.append(2 if paciente.oxigeno_suplementario else 0)
+
+    # 4. Presión arterial sistólica
+    pas = paciente.presion_sistolica
+    if pas <= 90:
+        scores.append(3)
+    elif 91 <= pas <= 100:
+        scores.append(2)
+    elif 101 <= pas <= 110:
+        scores.append(1)
+    elif 111 <= pas <= 219:
+        scores.append(0)
+    else:  # >= 220
+        scores.append(3)
+
+    # 5. Frecuencia cardíaca
+    fc = paciente.frecuencia_cardiaca
+    if fc <= 40:
+        scores.append(3)
+    elif 41 <= fc <= 50:
+        scores.append(1)
+    elif 51 <= fc <= 90:
+        scores.append(0)
+    elif 91 <= fc <= 110:
+        scores.append(1)
+    elif 111 <= fc <= 130:
+        scores.append(2)
+    else:  # >= 131
+        scores.append(3)
+
+    # 6. Conciencia (ACVPU)
+    acvpu = (paciente.escala_acvpu or "A").upper()
+    scores.append(0 if acvpu == "A" else 3)
+
+    # 7. Temperatura
+    temp = paciente.temperatura
+    if temp <= 35.0:
+        scores.append(3)
+    elif 35.1 <= temp <= 36.0:
+        scores.append(1)
+    elif 36.1 <= temp <= 38.0:
+        scores.append(0)
+    elif 38.1 <= temp <= 39.0:
+        scores.append(1)
+    else:  # >= 39.1
+        scores.append(2)
+
+    total = sum(scores)
+    score_rojo = any(s == 3 for s in scores)
+
+    if total >= 7:
+        nivel = "ALTO"
+        respuesta = "Riesgo Alto / Emergencia (evaluación crítica inmediata y consideración de UCI)."
+    elif total >= 5 or score_rojo:
+        nivel = "MEDIO"
+        respuesta = "Riesgo Medio (respuesta urgente por médico de piso)."
+    else:
+        nivel = "BAJO"
+        respuesta = "Riesgo Bajo (monitoreo de enfermería en sala general)."
+
+    return total, nivel, respuesta
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +442,8 @@ def escenario_dilema_critico() -> List[Paciente]:
             hora_llegada=MINUTO_ACTUAL_TURNO - 10,
             sat_o2=79.0, pafi=110, escala_sofa=6, glasgow=14, requiere_ventilador=True,
             comorbilidades_graves=[], enfermedad_terminal_irreversible=False, vulnerabilidad_social=False,
+            frecuencia_respiratoria=28, presion_sistolica=118, frecuencia_cardiaca=112,
+            temperatura=38.4, oxigeno_suplementario=True, escala_acvpu="A",
             descripcion="Joven sin comorbilidades. Neumonía grave con SDRA moderado. Excelente pronóstico "
                         "de recuperación si recibe UCI. Llegó hace 10 minutos.",
         ),
@@ -322,6 +453,8 @@ def escenario_dilema_critico() -> List[Paciente]:
             sat_o2=81.0, pafi=125, escala_sofa=7, glasgow=14, requiere_ventilador=True,
             comorbilidades_graves=["Hipertensión arterial crónica"],
             enfermedad_terminal_irreversible=False, vulnerabilidad_social=True,
+            frecuencia_respiratoria=26, presion_sistolica=135, frecuencia_cardiaca=98,
+            temperatura=37.2, oxigeno_suplementario=True, escala_acvpu="A",
             descripcion="Adulta mayor hipertensa pero autónoma, madre cabeza de familia rural (sujeto de "
                         "especial protección constitucional). Primera en llegar (hace 45 minutos).",
         ),
@@ -331,10 +464,124 @@ def escenario_dilema_critico() -> List[Paciente]:
             sat_o2=74.0, pafi=85, escala_sofa=16, glasgow=9, requiere_ventilador=True,
             comorbilidades_graves=["Adenocarcinoma de páncreas metastásico (estadio IV)"],
             enfermedad_terminal_irreversible=True, vulnerabilidad_social=False,
+            frecuencia_respiratoria=30, presion_sistolica=88, frecuencia_cardiaca=125,
+            temperatura=35.8, oxigeno_suplementario=True, escala_acvpu="V",
             descripcion="Falla multiorgánica severa sobre enfermedad oncológica terminal avanzada. "
                         "Llegó hace 30 minutos.",
         ),
     ]
+
+
+def escenario_evolucion_temporal_dilema() -> Dict[str, List[EvolucionPaciente]]:
+    """Escenario temporal dinámico para el caso de los 3 pacientes a 6h, 12h y 24h.
+
+    Cronología clínica:
+    - 6h: El paciente asignado a UCI muestra estabilización gradual bajo ventilación protectora;
+          el paciente en espera continúa con soporte vital transitorio en área de expansión.
+    - 12h: El paciente asignado a UCI muestra franca mejoría post-terapia prono/ventilatoria
+           (SOFA baja a 2), es extubado con éxito y trasladado a Cuidados Intermedios.
+           SE LIBERA 1 CAMA UCI Y 1 VENTILADOR.
+           El comité re-delibera de inmediato y admite al paciente en lista de espera priorizada.
+    - 24h: El nuevo paciente admitido en UCI consolida mejoría; el paciente en intermedios continúa estable.
+    """
+    return {
+        "PAC-001": [
+            EvolucionPaciente(
+                paciente_id="PAC-001",
+                hora=6,
+                delta_sofa=-1,
+                delta_sat_o2=3.0,
+                delta_pafi=25,
+                evento_clinico="Tolerancia adecuada a maniobras en decúbito prono; PaFi en ascenso gradual.",
+                libera_cama=False,
+                nuevo_estado_cuidado="UCI",
+            ),
+            EvolucionPaciente(
+                paciente_id="PAC-001",
+                hora=12,
+                delta_sofa=-4,
+                delta_sat_o2=15.0,
+                delta_pafi=170,
+                evento_clinico="Franca mejoría post-terapia prono/ventilatoria (SOFA baja de 6 a 2); extubación exitosa y traslado a Cuidados Intermedios.",
+                libera_cama=True,
+                nuevo_estado_cuidado="INTERMEDIOS",
+            ),
+            EvolucionPaciente(
+                paciente_id="PAC-001",
+                hora=24,
+                delta_sofa=0,
+                delta_sat_o2=1.0,
+                delta_pafi=15,
+                evento_clinico="Evolución clínica favorable en Cuidados Intermedios sin soporte invasivo ni O2 suplementario.",
+                libera_cama=False,
+                nuevo_estado_cuidado="INTERMEDIOS",
+            ),
+        ],
+        "PAC-002": [
+            EvolucionPaciente(
+                paciente_id="PAC-002",
+                hora=6,
+                delta_sofa=-1,
+                delta_sat_o2=2.0,
+                delta_pafi=20,
+                evento_clinico="Tolerancia hemodinámica y ventilatoria adecuada bajo ventilación protectora (o soporte transitorio en expansión).",
+                libera_cama=False,
+                nuevo_estado_cuidado="UCI",
+            ),
+            EvolucionPaciente(
+                paciente_id="PAC-002",
+                hora=12,
+                delta_sofa=-5,
+                delta_sat_o2=14.0,
+                delta_pafi=160,
+                evento_clinico="Franca mejoría post-terapia prono/ventilatoria (SOFA baja de 7 a 2); extubación exitosa y traslado a Cuidados Intermedios.",
+                libera_cama=True,
+                nuevo_estado_cuidado="INTERMEDIOS",
+            ),
+            EvolucionPaciente(
+                paciente_id="PAC-002",
+                hora=24,
+                delta_sofa=0,
+                delta_sat_o2=1.0,
+                delta_pafi=15,
+                evento_clinico="Recuperación progresiva en Cuidados Intermedios; signos vitales estables y sin soporte invasivo.",
+                libera_cama=False,
+                nuevo_estado_cuidado="INTERMEDIOS",
+            ),
+        ],
+        "PAC-003": [
+            EvolucionPaciente(
+                paciente_id="PAC-003",
+                hora=6,
+                delta_sofa=0,
+                delta_sat_o2=0.0,
+                delta_pafi=0,
+                evento_clinico="Titulación de analgesia multimodal y opioides en sala de cuidados paliativos; alivio del dolor y disnea.",
+                libera_cama=False,
+                nuevo_estado_cuidado="PALIATIVOS",
+            ),
+            EvolucionPaciente(
+                paciente_id="PAC-003",
+                hora=12,
+                delta_sofa=0,
+                delta_sat_o2=0.0,
+                delta_pafi=0,
+                evento_clinico="Confort óptimo bajo sedación paliativa proporcional y acompañamiento familiar digno (Ley 1733 de 2014).",
+                libera_cama=False,
+                nuevo_estado_cuidado="PALIATIVOS",
+            ),
+            EvolucionPaciente(
+                paciente_id="PAC-003",
+                hora=24,
+                delta_sofa=0,
+                delta_sat_o2=0.0,
+                delta_pafi=0,
+                evento_clinico="Atención al final de la vida con estricto respeto a la dignidad y directivas anticipadas.",
+                libera_cama=False,
+                nuevo_estado_cuidado="PALIATIVOS",
+            ),
+        ],
+    }
 
 
 def escenario_prueba_edadismo() -> List[Paciente]:

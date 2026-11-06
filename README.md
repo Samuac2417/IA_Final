@@ -50,6 +50,7 @@ triage_multiagent_system/
 ### Agente 1: ClinicalTriageAgent (Medicina Crítica)
 Evalúa únicamente parámetros fisiológicos objetivos, aislando deliberadamente factores demográficos y socioeconómicos:
 - **REG-CLIN-00:** Clasificación inicial de ingreso mediante el sistema de triage de urgencias (Resolución 5596 de 2015 / Manchester).
+- **REG-CLIN-NEWS2:** Tamizaje ultrarrápido dinámico mediante la escala NEWS2 (*National Early Warning Score 2*, Royal College of Physicians 2017). Evalúa 7 parámetros fisiológicos basales (FR, SpO2, O2 suplementario, PAS, FC, conciencia ACVPU y temperatura). Si $\text{NEWS2} \ge 7$, dispara alerta crítica de deterioro inminente previa a la toma de gases arteriales.
 - **REG-CLIN-01 (C1):** Alerta de soporte ventilatorio invasivo inmediato ante hipoxemia refractaria ($\text{SatO}_2 < 85\%$ o $\text{PaFi} < 150$).
 - **REG-CLIN-01B:** Estratificación del Síndrome de Dificultad Respiratoria Aguda (SDRA) según los criterios de Berlín (2012).
 - **REG-CLIN-02 (C2):** Evaluación multiorgánica mediante la escala SOFA (*Sequential Organ Failure Assessment*):
@@ -99,7 +100,7 @@ El sistema incluye el botón de carga del caso clínico de prueba:
 2. **Elena Restrepo (76 años):** $\text{SatO}_2 = 81\%$, $\text{PaFi} = 125$, $\text{SOFA} = 7$, requiere ventilador, madre comunitaria rural vulnerable, llegó hace 45 min (primera en llegar).
 3. **Jorge Valencia (58 años):** $\text{SatO}_2 = 74\%$, $\text{PaFi} = 85$, $\text{SOFA} = 16$, cáncer pancreático metastásico terminal, llegó hace 30 min.
 
-### Resultados de la Deliberación:
+### Resultados de la Deliberación Inicial (t = 0h):
 - **Jorge Valencia:** Descartado para cama UCI en todos los marcos por **Futilidad Terapéutica (Prioridad 4)**. Se le activa protocolo de Cuidado Paliativo Digno para evitar distanasia (Ley 1733 de 2014).
 - **Competencia directa Carlos vs. Elena (1 Cama):**
   - **Bajo Utilitarismo:** Se asigna a **Carlos Mendoza** (34 años) por mayor expectativa de años de vida. El `BioethicsAuditAgent` emite una **Objeción Bioética** por sesgo de edad.
@@ -108,7 +109,20 @@ El sistema incluye el botón de carga del caso clínico de prueba:
 
 ---
 
-## 6. Instalación y Ejecución
+## 6. Motor de Simulación Dinámica Temporal Multi-Ronda (0h -> 6h -> 12h -> 24h)
+
+El sistema trasciende la evaluación estática tradicional incorporando un motor dinámico determinista de seguimiento clínico:
+
+1. **t = 0h (Ingreso):** Evaluación basal con tamizaje NEWS2, clasificación de SDRA y deliberación ética con asignación de recursos.
+2. **t = 6h:** Monitoreo hemodinámico y ventilatorio en prono. El paciente en UCI continúa en tratamiento; el paciente en lista de espera recibe soporte transitorio en área de expansión.
+3. **t = 12h (Liberación de Cama y Reasignación Auditada):**
+   - El paciente en UCI muestra franca mejoría clínica post-terapia ($\text{SOFA} \le 3$, extubación exitosa) $\to$ se ordena traslado a **Cuidados Intermedios** y **SE LIBERA 1 CAMA UCI Y 1 VENTILADOR**.
+   - El comité delibera automáticamente ante el recurso liberado y reasigna la cama de forma determinista y auditada al paciente que permanecía en lista de espera priorizada (reduciendo la cola de espera de 1 a 0).
+4. **t = 24h:** Consolidación de la mejoría del nuevo paciente en UCI y estabilidad del paciente en cuidados intermedios.
+
+---
+
+## 7. Instalación y Ejecución
 
 ### Requisitos Previos
 - Python 3.10 o superior instalado.
@@ -136,28 +150,30 @@ El sistema incluye el botón de carga del caso clínico de prueba:
 
 ---
 
-## 7. Guion Recomendado para el Video de Demostración (10 Minutos)
+## 8. Guion Recomendado para el Video de Demostración (10 Minutos)
 
 - **Minuto 0:00 - 1:30 | Introducción y Planteamiento del Problema:**
   - Presentar la institución (Universidad Católica Luis Amigó) y el objetivo del proyecto.
   - Explicar por qué los modelos de Machine Learning de caja negra no son éticamente viables en este contexto y por qué se optó por IA Simbólica Multiagente con trazabilidad total.
-- **Minuto 1:30 - 3:00 | Arquitectura de los Agentes:**
-  - Describir el rol del `ClinicalTriageAgent` (fisiología pura), `ResourceManagerAgent` (capacidad e inventario) y `BioethicsAuditAgent` (auditoría constitucional y no discriminación).
-- **Minuto 3:00 - 6:00 | Demostración en Vivo del Caso Crítico:**
-  - Presionar el botón *"Cargar Caso de Dilema Crítico"* (3 pacientes vs. 1 cama).
-  - Mostrar cómo Jorge Valencia es clasificado en Prioridad 4 (Paliativo) por la regla C3, explicando que esto evita la distanasia.
-  - Demostrar el cambio en tiempo real al alternar entre Utilitarismo (gana Carlos Mendoza), Deontología (gana Elena Restrepo por llegada) y Consenso Constitucional (gana Elena por empate técnico + protección reforzada).
-- **Minuto 6:00 - 8:00 | Explicabilidad Paso a Paso (XAI):**
-  - Abrir la Pestaña 2 del dashboard y mostrar la cadena lógica `[Hecho Clínico] -> [Regla Disparada] -> [Auditoría Ética] -> [Recomendación Final]`.
-  - Mostrar el gráfico de dispersión de urgencia vs. reversibilidad en Plotly y el árbol de inferencia visual en Graphviz.
-  - Mostrar la descarga del archivo de auditoría JSON/CSV.
-- **Minuto 8:00 - 10:00 | Cierre Normativo y Matriz de Responsabilidad:**
-  - Mostrar la Pestaña 3 con la matriz de responsabilidad civil (Desarrollador vs. Hospital vs. Médico).
+- **Minuto 1:30 - 3:00 | Arquitectura de los Agentes, NEWS2 y Panel Asistencial:**
+  - Describir el rol del `ClinicalTriageAgent` (fisiología pura y tamizaje NEWS2), `ResourceManagerAgent` (capacidad e inventario) y `BioethicsAuditAgent` (auditoría constitucional y no discriminación).
+  - Mostrar el nuevo diseño de nivel clínico hospitalario (CDSS-XAI) con fichas clínicas de urgencias y tarjetas NEWS2 (Royal College of Physicians 2017).
+- **Minuto 3:00 - 6:00 | Demostración en Vivo del Caso Crítico y Dilemas Éticos:**
+  - Presionar el botón *"🚨 Cargar Caso de Dilema Crítico"* (3 pacientes vs. 1 cama).
+  - En la **Pestaña 1 (Tablero de Pacientes)**: Mostrar cómo Jorge Valencia es clasificado en Prioridad 4 (Paliativo) por futilidad, evitando la distanasia.
+  - En la **Pestaña 3 (Dilemas Éticos Comparados)**: Demostrar el cambio en tiempo real al alternar entre Utilitarismo (gana Carlos Mendoza), Deontología (gana Elena Restrepo por llegada) y Consenso Constitucional (gana Elena por empate técnico + protección reforzada).
+- **Minuto 6:00 - 8:00 | Simulación Temporal Multi-Ronda (0h -> 24h) y Rotación de Camas:**
+  - Activar el toggle *"⏱️ Modo Simulación Dinámica Temporal"* en la barra lateral.
+  - Mover el selector temporal a **12 Horas**: Observar cómo Elena Restrepo muestra franca mejoría ($\text{SOFA} \le 3$, extubada) y es trasladada a Cuidados Intermedios, liberando la cama UCI y el ventilador.
+  - Mostrar cómo el comité reasigna inmediatamente la cama liberada a Carlos Mendoza (admitido desde la lista de espera CRUE).
+  - Mostrar el gráfico interactivo de flujo asistencial en Plotly.
+- **Minuto 8:00 - 10:00 | Cierre Normativo, Explicabilidad y Responsabilidad:**
+  - Mostrar las trazas XAI en la **Pestaña 4** y el Marco Legal en la **Pestaña 5** con la matriz de responsabilidad civil (Desarrollador vs. Hospital vs. Médico).
   - Enfatizar el principio *Human-in-the-Loop* de la Ley 23 de 1981 y las directrices de la UNESCO para la ética en IA.
 
 ---
 
-## 8. Marco Legal y Referencias Normativas
+## 9. Marco Legal y Referencias Normativas
 
 - **Constitución Política de Colombia (1991):** Artículos 1 (Dignidad Humana), 13 (Igualdad y Protección a Población Vulnerable), 43, 46 y 49.
 - **Corte Constitucional de Colombia:** Sentencia T-760 de 2008 (Salud como derecho fundamental y prohibición de discriminación arbitraria).

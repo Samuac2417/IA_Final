@@ -31,8 +31,9 @@ from agents.clinical_agent import ClinicalTriageAgent
 from agents.resource_agent import ResourceManagerAgent
 from core import knowledge_base as kb
 from core.models import (
-    ContextoAuditoria, DecisionFinal, Destino, EstadoHospital, Etapa, EvaluacionClinica, ModoEtico,
-    Nivel, Paciente, RecursoHospitalario, ResultadoComite, TrazaInferencia, ValidacionEtica,
+    ContextoAuditoria, DecisionFinal, Destino, EstadoHospital, EstadoRonda, Etapa,
+    EvaluacionClinica, EvolucionPaciente, ModoEtico, Nivel, Paciente, RecursoHospitalario,
+    ReporteRobustez, ResultadoComite, TrazaInferencia, ValidacionEtica,
 )
 
 NOMBRE_COORDINADOR = "ConsensusCoordinator"
@@ -54,7 +55,15 @@ class ConsensusCoordinator:
         self.agente_bioetico = BioethicsAuditAgent()
 
     # ================================================================ público
-    def deliberar(self, pacientes: List[Paciente], estado: RecursoHospitalario) -> ResultadoComite:
+    def deliberar(
+        self,
+        pacientes: List[Paciente],
+        estado: RecursoHospitalario,
+        reportes_robustez: Optional[Dict[str, ReporteRobustez]] = None,
+        ejecutar_monte_carlo: bool = False,
+        n_iteraciones_mc: int = 1000,
+        semilla_mc: int = 42,
+    ) -> ResultadoComite:
         """Ejecuta una sesión completa del comité y devuelve el acta."""
         ids = [p.id for p in pacientes]
         if len(ids) != len(set(ids)):
@@ -62,6 +71,12 @@ class ConsensusCoordinator:
         modo = estado.modo
         por_id = {p.id: p for p in pacientes}
         trazas: List[TrazaInferencia] = []
+
+        # Análisis opcional de Monte Carlo si se solicita explícitamente y no viene precalculado
+        if ejecutar_monte_carlo and reportes_robustez is None and pacientes:
+            reportes_robustez = self.ejecutar_analisis_monte_carlo(
+                pacientes, estado, n_iteraciones=n_iteraciones_mc, semilla=semilla_mc
+            )
 
         # 1. Evaluación clínica ------------------------------------------------
         d_clin = self.agente_clinico.evaluar(pacientes)
@@ -117,6 +132,7 @@ class ConsensusCoordinator:
             candidatos_p1=candidatos, orden_prioridad=orden, puntajes=puntajes, asignados=asignados,
             no_asignados=no_asignados, asignados_contrafactual_sin_edad=contrafactual,
             proteccion_reforzada_aplicada=proteccion, empates_detectados=empates,
+            reportes_robustez=reportes_robustez,
         )
         d_bio = self.agente_bioetico.evaluar(ctx)
         validaciones: Dict[str, str] = d_bio.datos["validacion_por_paciente"]
@@ -141,7 +157,7 @@ class ConsensusCoordinator:
 
         validacion_global = d_bio.datos["validacion_global"]
         acta = self._redactar_acta(modo, estado_h, estado, pacientes, decisiones, d_bio.datos["objeciones"],
-                                   validacion_global, contrafactual, asignados)
+                                    validacion_global, contrafactual, asignados)
 
         return ResultadoComite(
             modo=modo.value, estado_hospital=estado_h, pacientes=list(pacientes), evaluaciones=evaluaciones,
@@ -149,13 +165,352 @@ class ConsensusCoordinator:
             decisiones=decisiones, orden_prioridad=orden, puntajes=puntajes, trazas_coordinador=trazas,
             acta_consenso=acta, validacion_global=validacion_global,
             asignados_contrafactual_sin_edad=contrafactual, etiqueta_puntaje=etiqueta,
+            reportes_robustez=reportes_robustez,
         )
+
+    def ejecutar_analisis_monte_carlo(
+        self,
+        pacientes: List[Paciente],
+        estado: RecursoHospitalario,
+        n_iteraciones: int = 1000,
+        semilla: int = 42,
+    ) -> Dict[str, ReporteRobustez]:
+        """Análisis de Sensibilidad Estocástica (Simulación de Monte Carlo en Casos Borde).
+
+        Evalúa la estabilidad y robustez de las recomendaciones ante variabilidad instrumental
+        y de medición interobservador. Es 100% determinista y auditable mediante el uso de una
+        semilla pseudoaleatoria explícita.
+
+        Márgenes de variabilidad modelados:
+            - SatO2: error instrumental de pulsioxímetros comerciales (distribución normal, sigma = 1.5 %).
+            - PaFi: variabilidad analítica de gasometría arterial (distribución normal, sigma = 10 mmHg).
+            - SOFA: discrepancia interobservador (+- 1 punto con probabilidad p = 0.15).
+        """
+        if n_iteraciones <= 0:
+            raise ValueError("El número de iteraciones de Monte Carlo debe ser mayor a 0.")
+        if not pacientes:
+            return {}
+
+        # 1. Deliberación base determinista (sin Monte Carlo recursivo)
+        res_base = self.deliberar(pacientes, estado, ejecutar_monte_carlo=False)
+        destinos_base = {p.id: res_base.decisiones[p.id].destino for p in pacientes}
+
+        # 2. Generador estocástico reproducible
+        rng = random.Random(semilla)
+        conteo_estabilidad: Dict[str, int] = {p.id: 0 for p in pacientes}
+
+        desviaciones_config = {
+            "SatO2 (sigma)": 1.5,
+            "PaFi (sigma mmHg)": 10.0,
+            "SOFA (variabilidad +-1 prob)": 0.15,
+        }
+
+        # 3. Iteraciones de perturbación instrumental
+        for _ in range(n_iteraciones):
+            pacientes_perturbados: List[Paciente] = []
+            for p in pacientes:
+                # Perturbación normal truncada en saturación de oxígeno (sigma = 1.5 %)
+                delta_sat = rng.gauss(0.0, 1.5)
+                nuevo_sat = max(0.0, min(100.0, round(p.sat_o2 + delta_sat, 1)))
+
+                # Perturbación normal truncada en PaFi arterial (sigma = 10 mmHg)
+                delta_pafi = rng.gauss(0.0, 10.0)
+                nuevo_pafi = max(20, min(700, int(round(p.pafi + delta_pafi))))
+
+                # Variabilidad interobservador en SOFA (+- 1 punto con p=0.15)
+                r_sofa = rng.random()
+                delta_sofa = -1 if r_sofa < 0.075 else (1 if r_sofa < 0.15 else 0)
+                nuevo_sofa = max(0, min(24, p.escala_sofa + delta_sofa))
+
+                pacientes_perturbados.append(replace(p, sat_o2=nuevo_sat, pafi=nuevo_pafi, escala_sofa=nuevo_sofa))
+
+            res_sim = self.deliberar(pacientes_perturbados, estado, ejecutar_monte_carlo=False)
+
+            for p in pacientes:
+                if res_sim.decisiones[p.id].destino == destinos_base[p.id]:
+                    conteo_estabilidad[p.id] += 1
+
+        # 4. Consolidación de reportes de robustez
+        reportes: Dict[str, ReporteRobustez] = {}
+        for p in pacientes:
+            pct = round((conteo_estabilidad[p.id] / n_iteraciones) * 100.0, 2)
+            diag = "ROBUSTA / SEGURA" if pct >= 90.0 else "ZONA FRONTERA / CASO BORDE"
+            if pct >= 90.0:
+                adv = (
+                    f"Recomendación clínicamente ROBUSTA ({pct:.1f}% de consistencia). Decisión estable ante "
+                    "variabilidad instrumental de oximetría y gases arteriales."
+                )
+            else:
+                adv = (
+                    f"ADVERTENCIA DE CASO BORDE: Estabilidad del {pct:.1f}% (< 90%). La asignación es sensible "
+                    "a la tolerancia de los instrumentos. Se sugiere repetir gases arteriales y reevaluar SOFA "
+                    "antes de ejecutar la decisión definitiva."
+                )
+            reportes[p.id] = ReporteRobustez(
+                paciente_id=p.id,
+                porcentaje_estabilidad_decision=pct,
+                iteraciones_totales=n_iteraciones,
+                desviaciones_simuladas=desviaciones_config,
+                diagnostico_frontera=diag,
+                advertencia_clinica=adv,
+            )
+
+        return reportes
 
     def comparar_marcos(self, pacientes: List[Paciente],
                         estado: RecursoHospitalario) -> Dict[str, ResultadoComite]:
         """Ejecuta la deliberación bajo los tres marcos éticos (análisis de sensibilidad)."""
         return {m.value: self.deliberar(pacientes, replace(estado, modo_etico_activo=m.value))
                 for m in ModoEtico}
+
+    # ======================================================= simulación temporal
+    def simular_linea_tiempo(
+        self,
+        pacientes_iniciales: List[Paciente],
+        estado_inicial: RecursoHospitalario,
+        escenarios_evolucion: Dict[str, List[EvolucionPaciente]],
+    ) -> List[EstadoRonda]:
+        """Ejecuta una simulación temporal multi-ronda (0h -> 6h -> 12h -> 24h).
+
+        Protocolo de evolución:
+        1. t = 0h (Ingreso): Deliberación inicial estática del comité con asignación física.
+        2. t = 6h, 12h, 24h:
+           a) Se actualizan los signos vitales, oxigenación y escala SOFA de cada paciente.
+           b) Si un paciente en UCI mejora (SOFA <= 3 y sin requerimiento de ventilador), se
+              ordena traslado a Cuidados Intermedios y SE LIBERA 1 CAMA UCI Y 1 VENTILADOR.
+           c) Si un paciente empeora severamente hacia futilidad (SOFA >= 15 + irreversible),
+              se activa adecuación del esfuerzo terapéutico (P4) y se libera el recurso.
+           d) Con las camas liberadas, el comité re-delibera automáticamente para asignar los
+              cupos a los pacientes que estaban en lista de espera priorizada (área de expansión/CRUE).
+        """
+        cortes_temporales = [0, 6, 12, 24]
+        rondas: List[EstadoRonda] = []
+
+        # Mapa mutable de pacientes actuales
+        pacientes_map: Dict[str, Paciente] = {p.id: replace(p) for p in pacientes_iniciales}
+
+        # Seguimiento del estado de asignación
+        asignados_uci: set[str] = set()
+        asignados_vent: set[str] = set()
+        en_intermedios: set[str] = set()
+        en_paliativos: set[str] = set()
+
+        for hora in cortes_temporales:
+            eventos_ronda: List[str] = []
+
+            if hora == 0:
+                # ----------------- t = 0h: Ingreso y deliberación inicial
+                res_0 = self.deliberar(list(pacientes_map.values()), estado_inicial, ejecutar_monte_carlo=False)
+                asignados_uci = set(res_0.asignados_uci)
+                asignados_vent = {pid for pid, d in res_0.decisiones.items() if d.asignado_ventilador}
+
+                for pid, e in res_0.evaluaciones.items():
+                    if e.prioridad == 4:
+                        en_paliativos.add(pid)
+                    elif e.prioridad == 2 and pid not in asignados_uci:
+                        en_intermedios.add(pid)
+
+                nombres_uci = [pacientes_map[x].nombre for x in asignados_uci]
+                eventos_ronda.append(
+                    f"t = 0h (Ingreso): Deliberación inicial del comité ({kb.MARCOS_ETICOS[estado_inicial.modo.value]['nombre']}). "
+                    f"Camas UCI asignadas a: {', '.join(nombres_uci) or 'Ninguno'}."
+                )
+                en_espera = [pacientes_map[x].nombre for x in res_0.orden_prioridad if x not in asignados_uci]
+                if en_espera:
+                    eventos_ronda.append(
+                        f"Pacientes en lista de espera priorizada (soporte en área de expansión + CRUE): {', '.join(en_espera)}."
+                    )
+
+                rondas.append(EstadoRonda(
+                    hora=0,
+                    recursos=replace(estado_inicial),
+                    resultado_comite=res_0,
+                    eventos=eventos_ronda,
+                ))
+                continue
+
+            # ----------------- t = 6h, 12h, 24h: Evolución temporal
+            # 1. Actualizar signos vitales y parámetros clínicos
+            for pid, p in list(pacientes_map.items()):
+                lista_evo = escenarios_evolucion.get(pid, [])
+                evo = next((e for e in lista_evo if e.hora == hora), None)
+                if evo is None:
+                    continue
+
+                estaba_en_uci = pid in asignados_uci
+                estaba_en_espera = (pid not in asignados_uci and pid not in en_intermedios and pid not in en_paliativos)
+
+                # Si el paciente estaba en espera y la evolución era de quien ya estaba en UCI,
+                # mantener su estado de necesidad crítica P1 para que pueda recibir la cama liberada
+                if estaba_en_espera and evo.libera_cama:
+                    delta_sofa = min(0, evo.delta_sofa + 3)
+                    nuevo_sofa = max(4, min(24, p.escala_sofa + delta_sofa))
+                    nueva_sat = min(88.0, max(50.0, round(p.sat_o2 + 2.0, 1)))
+                    nuevo_pafi = min(140, max(20, p.pafi + 15))
+                    req_vent = True
+                    o2_sup = True
+                    fr = 24
+                    pas = 125
+                    fc = 95
+                    temp = 37.5
+                    acvpu = "A"
+                    nuevo_estado = "UCI"
+                    evento_txt = (
+                        f"t = {hora}h · {p.nombre} ({pid}): Permanece en soporte transitorio en área de expansión (CRUE). "
+                        f"Persiste en Prioridad 1 (SOFA {nuevo_sofa}, PaFi {nuevo_pafi}) a la espera de cama UCI."
+                    )
+                else:
+                    delta_sofa = evo.delta_sofa
+                    nuevo_sofa = max(0, min(24, p.escala_sofa + delta_sofa))
+                    nueva_sat = max(50.0, min(100.0, round(p.sat_o2 + evo.delta_sat_o2, 1)))
+                    nuevo_pafi = max(20, min(700, p.pafi + evo.delta_pafi))
+                    nuevo_estado = evo.nuevo_estado_cuidado
+                    req_vent = p.requiere_ventilador
+                    o2_sup = p.oxigeno_suplementario
+                    fr = p.frecuencia_respiratoria
+                    pas = p.presion_sistolica
+                    fc = p.frecuencia_cardiaca
+                    temp = p.temperatura
+                    acvpu = p.escala_acvpu
+
+                    # Si el paciente pasa a intermedios / alta o mejora significativamente en UCI
+                    if nuevo_sofa <= 3 and nuevo_estado in ("INTERMEDIOS", "ALTA"):
+                        req_vent = False
+                        o2_sup = False
+                        fr = 16
+                        pas = 120
+                        fc = 75
+                        temp = 36.8
+                        acvpu = "A"
+                        nueva_sat = max(nueva_sat, 96.0)
+
+                    evento_txt = (
+                        f"t = {hora}h · {p.nombre} ({pid}): {evo.evento_clinico} "
+                        f"(SOFA: {p.escala_sofa} → {nuevo_sofa}, SatO2: {nueva_sat:.1f} %, PaFi: {nuevo_pafi})."
+                    )
+
+                pacientes_map[pid] = replace(
+                    p,
+                    escala_sofa=nuevo_sofa,
+                    sat_o2=nueva_sat,
+                    pafi=nuevo_pafi,
+                    requiere_ventilador=req_vent,
+                    oxigeno_suplementario=o2_sup,
+                    frecuencia_respiratoria=fr,
+                    presion_sistolica=pas,
+                    frecuencia_cardiaca=fc,
+                    temperatura=temp,
+                    escala_acvpu=acvpu,
+                )
+                eventos_ronda.append(evento_txt)
+
+            # 2. Detección de liberación de camas y ventiladores
+            camas_liberadas_ahora = 0
+            vent_liberados_ahora = 0
+
+            for pid in list(asignados_uci):
+                p = pacientes_map[pid]
+                lista_evo = escenarios_evolucion.get(pid, [])
+                evo = next((e for e in lista_evo if e.hora == hora), None)
+
+                mejora_uci = (p.escala_sofa <= 3 and not p.requiere_ventilador)
+                futilidad_uci = (p.escala_sofa >= 15 and p.enfermedad_terminal_irreversible)
+                libera_flag = evo.libera_cama if evo else False
+
+                if mejora_uci or futilidad_uci or libera_flag:
+                    asignados_uci.remove(pid)
+                    camas_liberadas_ahora += 1
+                    if pid in asignados_vent:
+                        asignados_vent.remove(pid)
+                        vent_liberados_ahora += 1
+
+                    if mejora_uci or (evo and evo.nuevo_estado_cuidado == "INTERMEDIOS"):
+                        en_intermedios.add(pid)
+                        eventos_ronda.append(
+                            f"🚨 LIBERACIÓN DINÁMICA DE RECURSOS (t = {hora}h): {p.nombre} ({pid}) presenta "
+                            f"franca mejoría post-terapia en UCI (SOFA = {p.escala_sofa} ≤ 3, extubación exitosa). "
+                            "Se ordena traslado a CUIDADOS INTERMEDIOS. SE LIBERA 1 CAMA UCI Y 1 VENTILADOR."
+                        )
+                    elif futilidad_uci or (evo and evo.nuevo_estado_cuidado == "PALIATIVOS"):
+                        en_paliativos.add(pid)
+                        eventos_ronda.append(
+                            f"🚨 ADECUACIÓN DEL ESFUERZO TERAPÉUTICO (t = {hora}h): {p.nombre} ({pid}) presenta "
+                            f"falla orgánica refractaria extrema (SOFA = {p.escala_sofa} ≥ 15). Se activa "
+                            "Cuidado Paliativo Integral (Ley 1733 de 2014). SE LIBERA 1 CAMA UCI Y 1 VENTILADOR."
+                        )
+                    else:
+                        nuevo_est = evo.nuevo_estado_cuidado if evo else "INTERMEDIOS"
+                        eventos_ronda.append(
+                            f"🚨 LIBERACIÓN DE RECURSO (t = {hora}h): {p.nombre} ({pid}) es transferido a "
+                            f"{nuevo_est}. SE LIBERA 1 CAMA UCI."
+                        )
+
+            # 3. Calcular inventario físico disponible en esta ronda
+            camas_ocupadas_preexistentes = len(asignados_uci)
+            vent_ocupados_preexistentes = len(asignados_vent)
+            camas_libres_ronda = max(0, estado_inicial.camas_uci_disponibles - camas_ocupadas_preexistentes)
+            vent_libres_ronda = max(0, estado_inicial.ventiladores_disponibles - vent_ocupados_preexistentes)
+
+            estado_ronda = replace(
+                estado_inicial,
+                camas_uci_disponibles=camas_libres_ronda,
+                ventiladores_disponibles=vent_libres_ronda,
+            )
+
+            # 4. Re-deliberación del comité
+            pacientes_para_deliberar = list(pacientes_map.values())
+            res_ronda = self.deliberar(pacientes_para_deliberar, estado_ronda, ejecutar_monte_carlo=False)
+
+            # Detectar reasignaciones de camas liberadas a pacientes en lista de espera
+            nuevos_ingresos_uci = [pid for pid in res_ronda.asignados_uci if pid not in asignados_uci]
+            for pid in nuevos_ingresos_uci:
+                asignados_uci.add(pid)
+                p_adm = pacientes_map[pid]
+                if res_ronda.decisiones[pid].asignado_ventilador:
+                    asignados_vent.add(pid)
+                eventos_ronda.append(
+                    f"✅ REASIGNACIÓN AUDITADA DEL COMITÉ (t = {hora}h): Cama UCI liberada asignada de inmediato a "
+                    f"{p_adm.nombre} ({pid}), procedente de lista de espera priorizada (área de expansión + CRUE)."
+                )
+
+            # Consolidar decisiones finales reflejando el destino real de cada paciente en la ronda
+            decisiones_ronda = dict(res_ronda.decisiones)
+            for pid, dec in list(decisiones_ronda.items()):
+                if pid in asignados_uci and not dec.asignado_uci:
+                    decisiones_ronda[pid] = replace(
+                        dec,
+                        asignado_uci=True,
+                        asignado_ventilador=pid in asignados_vent,
+                        destino=Destino.UCI.value + (" + VENTILADOR MECÁNICO" if pid in asignados_vent else ""),
+                        justificacion="Continúa hospitalizado en UCI (admitido previamente). Evolución clínica monitoreada.",
+                    )
+                elif pid in en_intermedios:
+                    decisiones_ronda[pid] = replace(
+                        dec,
+                        asignado_uci=False,
+                        asignado_ventilador=False,
+                        destino=Destino.INTERMEDIOS.value,
+                        justificacion="Trasladado a Cuidados Intermedios tras franca mejoría y extubación exitosa en UCI.",
+                    )
+                elif pid in en_paliativos:
+                    decisiones_ronda[pid] = replace(
+                        dec,
+                        asignado_uci=False,
+                        asignado_ventilador=False,
+                        destino=Destino.PALIATIVO.value,
+                        justificacion="Cuidado Paliativo Integral activo sin abandono (Ley 1733 de 2014).",
+                    )
+
+            res_ronda = replace(res_ronda, decisiones=decisiones_ronda)
+
+            rondas.append(EstadoRonda(
+                hora=hora,
+                recursos=estado_ronda,
+                resultado_comite=res_ronda,
+                eventos=eventos_ronda,
+            ))
+
+        return rondas
 
     # ======================================================= motor desempate
     def puntaje_utilitarista(self, p: Paciente, e: EvaluacionClinica, neutralizar_edad: bool = False) -> float:

@@ -112,6 +112,13 @@ class Paciente:
     enfermedad_terminal_irreversible: bool = False
     vulnerabilidad_social: bool = False
     descripcion: str = ""
+    # Parámetros fisiológicos basales para tamizaje NEWS2 (RCP 2017)
+    frecuencia_respiratoria: int = 16
+    presion_sistolica: int = 120
+    frecuencia_cardiaca: int = 75
+    temperatura: float = 36.8
+    oxigeno_suplementario: bool = False
+    escala_acvpu: str = "A"
 
     def __post_init__(self) -> None:
         errores: List[str] = []
@@ -129,9 +136,22 @@ class Paciente:
             errores.append(f"SOFA fuera de rango (0-24): {self.escala_sofa}")
         if not (3 <= self.glasgow <= 15):
             errores.append(f"Glasgow fuera de rango (3-15): {self.glasgow}")
+        if not (0 <= self.frecuencia_respiratoria <= 80):
+            errores.append(f"Frecuencia respiratoria fuera de rango plausible (0-80 rpm): {self.frecuencia_respiratoria}")
+        if not (30 <= self.presion_sistolica <= 300):
+            errores.append(f"Presión sistólica fuera de rango plausible (30-300 mmHg): {self.presion_sistolica}")
+        if not (20 <= self.frecuencia_cardiaca <= 250):
+            errores.append(f"Frecuencia cardíaca fuera de rango plausible (20-250 lpm): {self.frecuencia_cardiaca}")
+        if not (25.0 <= float(self.temperatura) <= 45.0):
+            errores.append(f"Temperatura fuera de rango plausible (25-45 °C): {self.temperatura}")
+        self.escala_acvpu = str(self.escala_acvpu).strip().upper()
+        if self.escala_acvpu not in {"A", "C", "V", "P", "U"}:
+            errores.append(f"Escala ACVPU inválida ('{self.escala_acvpu}'). Opciones: A, C, V, P, U")
         if errores:
             raise ValueError(f"Paciente {self.id}: " + " | ".join(errores))
         self.sat_o2 = float(self.sat_o2)
+        self.temperatura = float(self.temperatura)
+        self.oxigeno_suplementario = bool(self.oxigeno_suplementario)
         self.comorbilidades_graves = list(self.comorbilidades_graves or [])
 
     def minutos_espera(self, minuto_actual: int) -> int:
@@ -211,6 +231,9 @@ class EvaluacionClinica:
     clasificacion_sdra: str
     triage_urgencias: str
     futilidad_terapeutica: bool
+    news2_score: int = 0
+    news2_riesgo: str = "BAJO"
+    news2_respuesta: str = ""
 
     @property
     def etiqueta_prioridad(self) -> str:
@@ -244,6 +267,44 @@ class DictamenAgente:
 
 
 @dataclass
+class ReporteRobustez:
+    """Informe de sensibilidad estocástica (Monte Carlo) ante variabilidad instrumental.
+
+    Mide la estabilidad y robustez de las recomendaciones del comité frente al error
+    instrumental de pulsioxímetros (SatO2), variabilidad analítica de gases arteriales (PaFi)
+    y discrepancia interobservador en escalas de disfunción orgánica (SOFA).
+    """
+
+    paciente_id: str
+    porcentaje_estabilidad_decision: float
+    iteraciones_totales: int = 1000
+    desviaciones_simuladas: Dict[str, float] = field(default_factory=dict)
+    diagnostico_frontera: str = ""
+    advertencia_clinica: str = ""
+
+    def __post_init__(self) -> None:
+        self.porcentaje_estabilidad_decision = round(float(self.porcentaje_estabilidad_decision), 2)
+        if not self.diagnostico_frontera:
+            self.diagnostico_frontera = (
+                "ROBUSTA / SEGURA" if self.porcentaje_estabilidad_decision >= 90.0
+                else "ZONA FRONTERA / CASO BORDE"
+            )
+        if not self.advertencia_clinica:
+            if self.porcentaje_estabilidad_decision >= 90.0:
+                self.advertencia_clinica = (
+                    "Recomendación clínicamente robusta y segura ante variabilidad instrumental y "
+                    "de observador. La asignación se mantiene consistente en simulaciones estocásticas."
+                )
+            else:
+                self.advertencia_clinica = (
+                    "ALERTA CLÍNICA: Recomendación en zona frontera / caso borde. La decisión es "
+                    f"sensible a la tolerancia de los instrumentos de medición (inestabilidad del "
+                    f"{100.0 - self.porcentaje_estabilidad_decision:.1f}%). Se sugiere repetición inmediata de gases "
+                    "arteriales y reevaluación SOFA antes de ejecutar el acto médico definitivo."
+                )
+
+
+@dataclass
 class ContextoAuditoria:
     """Expediente que el coordinador entrega al BioethicsAuditAgent."""
 
@@ -259,6 +320,7 @@ class ContextoAuditoria:
     asignados_contrafactual_sin_edad: Optional[List[str]] = None
     proteccion_reforzada_aplicada: List[str] = field(default_factory=list)
     empates_detectados: List[List[str]] = field(default_factory=list)
+    reportes_robustez: Optional[Dict[str, ReporteRobustez]] = None
 
 
 @dataclass
@@ -295,6 +357,7 @@ class ResultadoComite:
     validacion_global: str
     asignados_contrafactual_sin_edad: Optional[List[str]] = None
     etiqueta_puntaje: str = ""
+    reportes_robustez: Optional[Dict[str, ReporteRobustez]] = None
 
     # -- utilidades de consulta ------------------------------------------------
     def paciente(self, paciente_id: str) -> Paciente:
@@ -322,6 +385,37 @@ class ResultadoComite:
 
 
 # ---------------------------------------------------------------------------
+# Simulación Temporal Multi-Ronda (0h -> 6h -> 12h -> 24h)
+# ---------------------------------------------------------------------------
+@dataclass
+class EvolucionPaciente:
+    """Registro de evolución fisiológica y de cuidado de un paciente en un corte temporal.
+
+    Permite simular la trayectoria clínica (respuesta a terapia prono/ventilatoria,
+    falla orgánica progresiva o transición paliativa).
+    """
+
+    paciente_id: str
+    hora: int                      # 0, 6, 12, 24
+    delta_sofa: int                # ej. -3 indica mejoría, +4 deterioro severo
+    delta_sat_o2: float
+    delta_pafi: int
+    evento_clinico: str            # ej. "Extubación exitosa por mejoría", "Falla hemodinámica refractaria", "Estable"
+    libera_cama: bool              # True si pasa a cuidados intermedios o fallece/pasa a paliativos
+    nuevo_estado_cuidado: str      # "UCI", "INTERMEDIOS", "PALIATIVOS", "ALTA"
+
+
+@dataclass
+class EstadoRonda:
+    """Fotografía del estado del hospital y deliberación del comité en un corte temporal."""
+
+    hora: int
+    recursos: RecursoHospitalario
+    resultado_comite: ResultadoComite
+    eventos: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Alias en inglés exigidos por la especificación
 # ---------------------------------------------------------------------------
 Patient = Paciente
@@ -333,5 +427,6 @@ __all__ = [
     "ModoEtico", "Prioridad", "Nivel", "Etapa", "EstadoHospital", "Destino", "ValidacionEtica",
     "Paciente", "RecursoHospitalario", "TrazaInferencia", "EvaluacionClinica", "DictamenAgente",
     "ContextoAuditoria", "DecisionFinal", "ResultadoComite", "ETIQUETAS_PRIORIDAD",
+    "ReporteRobustez", "EvolucionPaciente", "EstadoRonda",
     "Patient", "RuleTrace", "HospitalState", "AgentVerdict",
 ]

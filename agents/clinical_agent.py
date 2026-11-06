@@ -11,6 +11,7 @@ minimización de variables y no discriminación; verificado por REG-BIO-01).
 
 Reglas de producción:
     REG-CLIN-00  Registro de hechos y triage de urgencias (Res. 5596/2015)
+    REG-CLIN-NEWS2 Tamizaje ultrarrápido dinámico NEWS2 (RCP 2017)
     REG-CLIN-01  Hipoxemia refractaria (C1)
     REG-CLIN-01B Clasificación de oxigenación SDRA (Berlín 2012)
     REG-CLIN-02  Evaluación multiorgánica SOFA (C2)
@@ -38,7 +39,8 @@ class ClinicalTriageAgent(BaseAgent):
     # Variables que este agente tiene permitido leer (auditable por REG-BIO-01).
     VARIABLES_UTILIZADAS = ("sat_o2", "pafi", "escala_sofa", "glasgow",
                             "requiere_ventilador", "enfermedad_terminal_irreversible",
-                            "comorbilidades_graves (solo registro)")
+                            "comorbilidades_graves (solo registro)",
+                            "signos_vitales_news2 (FR, PAS, FC, Temp, O2, ACVPU)")
 
     # ----------------------------------------------------------------- público
     def evaluar(self, pacientes: List[Paciente]) -> DictamenAgente:  # type: ignore[override]
@@ -85,6 +87,34 @@ class ClinicalTriageAgent(BaseAgent):
             f"Clasificación inicial: {triage}.",
             f"{kb.cita('RES_5596_2015')}; Sistema de Triage Manchester.",
             pid, Nivel.INFO, Etapa.HECHO,
+        )
+
+        # REG-CLIN-NEWS2 · Tamizaje ultrarrápido dinámico NEWS2 (RCP 2017) --
+        news2_score, news2_riesgo, news2_resp = kb.calcular_news2(p)
+        cond_news2 = (
+            f"NEWS2 = {news2_score} ({news2_riesgo}) · FR = {p.frecuencia_respiratoria} rpm · "
+            f"PAS = {p.presion_sistolica} mmHg · FC = {p.frecuencia_cardiaca} lpm · "
+            f"Temp = {p.temperatura:.1f} °C · O2 suplementario = {'Sí' if p.oxigeno_suplementario else 'No'} · "
+            f"ACVPU = '{p.escala_acvpu}'"
+        )
+        if news2_score >= 7:
+            concl_n2 = (
+                f"ALERTA TEMPRANA DE DETERIORO INMINENTE (NEWS2 = {news2_score} ≥ 7): "
+                f"Alerta fisiológica crítica antes de la toma de gases arteriales. {news2_resp}"
+            )
+            nivel_n2 = Nivel.CRITICO
+        elif news2_riesgo == "MEDIO":
+            concl_n2 = f"Alerta de riesgo fisiológico intermedio (NEWS2 = {news2_score}). {news2_resp}"
+            nivel_n2 = Nivel.ALERTA
+        else:
+            concl_n2 = f"Estabilidad fisiológica basal (NEWS2 = {news2_score}). {news2_resp}"
+            nivel_n2 = Nivel.OK
+
+        self.registrar(
+            "REG-CLIN-NEWS2", cond_news2, concl_n2,
+            "Royal College of Physicians. National Early Warning Score (NEWS) 2: "
+            "Standardising the assessment of acute-illness severity in the NHS, 2017.",
+            pid, nivel_n2, Etapa.REGLA,
         )
 
         # REG-CLIN-01 · Hipoxemia refractaria (C1) ---------------------------
@@ -198,9 +228,13 @@ class ClinicalTriageAgent(BaseAgent):
                 )
 
         # REG-CLIN-06 · Clasificación final ---------------------------------
-        necesidad_critica = hipoxemia or p.requiere_ventilador or p.glasgow <= kb.GLASGOW_PROTECCION_VIA_AEREA
+        alerta_deterioro_inminente = news2_score >= 7
+        necesidad_critica = (hipoxemia or p.requiere_ventilador
+                             or p.glasgow <= kb.GLASGOW_PROTECCION_VIA_AEREA
+                             or alerta_deterioro_inminente)
         vigilancia = (p.sat_o2 < kb.UMBRAL_SATO2_VIGILANCIA or p.pafi < kb.UMBRAL_PAFI_VIGILANCIA
-                      or p.glasgow <= kb.GLASGOW_COMPROMISO_MODERADO or sofa >= kb.SOFA_VIGILANCIA_MIN)
+                      or p.glasgow <= kb.GLASGOW_COMPROMISO_MODERADO or sofa >= kb.SOFA_VIGILANCIA_MIN
+                      or news2_score >= 5)
 
         if futil:
             prioridad = Prioridad.P4_PALIATIVO
@@ -210,8 +244,8 @@ class ClinicalTriageAgent(BaseAgent):
             nivel_p = Nivel.CRITICO
         elif necesidad_critica:
             prioridad = Prioridad.P1_CRITICO_INESTABLE
-            cond_p = (f"Necesidad crítica (hipoxemia refractaria = {hipoxemia}, ventilador = "
-                      f"{p.requiere_ventilador}, Glasgow ≤ 8 = {p.glasgow <= 8}) AND NOT futilidad")
+            cond_p = (f"Necesidad crítica (hipoxemia = {hipoxemia}, ventilador = {p.requiere_ventilador}, "
+                      f"Glasgow ≤ 8 = {p.glasgow <= 8}, NEWS2 ≥ 7 = {alerta_deterioro_inminente}) AND NOT futilidad")
             extra = ("" if reversibilidad != "BAJA" else
                      " Reversibilidad BAJA documentada: ingresa a P1 porque no cumple causal de futilidad "
                      "(REG-CLIN-03) y el principio de no abandono impide excluirlo sin causa clínica.")
@@ -220,7 +254,7 @@ class ClinicalTriageAgent(BaseAgent):
             nivel_p = Nivel.CRITICO
         elif vigilancia:
             prioridad = Prioridad.P2_MONITOREO_INTENSIVO
-            cond_p = ("SatO2 < 92 % OR PaFi < 300 OR Glasgow ≤ 12 OR SOFA ≥ 2 (Sepsis-3), sin necesidad de "
+            cond_p = ("SatO2 < 92 % OR PaFi < 300 OR Glasgow ≤ 12 OR SOFA ≥ 2 OR NEWS2 ≥ 5, sin necesidad de "
                       "intubación inmediata")
             concl_p = ("PRIORIDAD 2 · Requiere monitoreo intensivo continuo por riesgo de deterioro, sin "
                        "intubación inmediata.")
@@ -249,4 +283,7 @@ class ClinicalTriageAgent(BaseAgent):
             clasificacion_sdra=sdra,
             triage_urgencias=triage,
             futilidad_terapeutica=futil,
+            news2_score=news2_score,
+            news2_riesgo=news2_riesgo,
+            news2_respuesta=news2_resp,
         )

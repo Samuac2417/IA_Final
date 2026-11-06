@@ -18,6 +18,7 @@ Reglas de producción:
     REG-BIO-05  Proporcionalidad / beneficencia (alerta de crítica deontológica)
     REG-BIO-06  Validación no discriminatoria de la futilidad (Ley 1733/2014)
     REG-BIO-07  Protección de datos sensibles (Ley 1581/2012)
+    REG-BIO-SENSIBILIDAD  Estabilidad estocástica Monte Carlo en casos borde e incertidumbre instrumental
 """
 
 from __future__ import annotations
@@ -280,6 +281,39 @@ class BioethicsAuditAgent(BaseAgent):
             f"{kb.cita('UNESCO_2021')} (supervisión y decisión humanas).",
             None, Nivel.INFO, Etapa.AUDITORIA,
         )
+
+        # ============================ REG-BIO-SENSIBILIDAD · Robustez Monte Carlo ==
+        if ctx.reportes_robustez:
+            for p in ctx.pacientes:
+                rep = ctx.reportes_robustez.get(p.id)
+                if rep is None:
+                    continue
+                estabilidad = rep.porcentaje_estabilidad_decision
+                if estabilidad < 85.0:
+                    self.registrar(
+                        "REG-BIO-SENSIBILIDAD",
+                        f"Estabilidad de asignación Monte Carlo ({estabilidad:.1f} %) < 85.0 % ante "
+                        "variabilidad instrumental esperada (SatO2 ±1.5 %, PaFi ±10 mmHg, SOFA ±1)",
+                        "ALERTA ESPECIAL — Dilema Clínico en Zona de Incertidumbre Instrumental: "
+                        "la recomendación de destino para este paciente es altamente inestable ante la tolerancia "
+                        "de los instrumentos de medición o escalas clínicas. Se exige una repetición inmediata de "
+                        "gases arteriales y reevaluación SOFA seriada antes de ejecutar el acto médico definitivo.",
+                        f"{kb.cita('LEY_23_1981')} Art. 10 y 13 (prudencia diagnóstica y diligencia médica); "
+                        f"{kb.cita('LEY_1751_2015')} (principio de calidad y seguridad).",
+                        p.id, Nivel.ALERTA, Etapa.AUDITORIA,
+                    )
+                    objeciones.append(
+                        f"Incertidumbre instrumental en {p.nombre}: estabilidad {estabilidad:.1f}% < 85% (REG-BIO-SENSIBILIDAD)."
+                    )
+                else:
+                    self.registrar(
+                        "REG-BIO-SENSIBILIDAD",
+                        f"Estabilidad de asignación Monte Carlo = {estabilidad:.1f} % (≥ 85.0 %)",
+                        f"ROBUSTEZ ANALÍTICA CONFIRMADA ({rep.diagnostico_frontera}): la recomendación se sostiene "
+                        "de forma consistente frente a variaciones instrumentales y de medición interobservador.",
+                        f"{kb.cita('LEY_23_1981')}; auditoría de sensibilidad estocástica.",
+                        p.id, Nivel.OK, Etapa.AUDITORIA,
+                    )
 
         # ============================ Consolidación ===========================
         validacion_paciente: Dict[str, str] = {}
