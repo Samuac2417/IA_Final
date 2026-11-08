@@ -157,19 +157,22 @@ El sistema trasciende la evaluación estática tradicional incorporando un motor
   - Explicar por qué los modelos de Machine Learning de caja negra no son éticamente viables en este contexto y por qué se optó por IA Simbólica Multiagente con trazabilidad total.
 - **Minuto 1:30 - 3:00 | Arquitectura de los Agentes, NEWS2 y Panel Asistencial:**
   - Describir el rol del `ClinicalTriageAgent` (fisiología pura y tamizaje NEWS2), `ResourceManagerAgent` (capacidad e inventario) y `BioethicsAuditAgent` (auditoría constitucional y no discriminación).
-  - Mostrar el nuevo diseño de nivel clínico hospitalario (CDSS-XAI) con fichas clínicas de urgencias y tarjetas NEWS2 (Royal College of Physicians 2017).
-- **Minuto 3:00 - 6:00 | Demostración en Vivo del Caso Crítico y Dilemas Éticos:**
-  - Presionar el botón *"🚨 Cargar Caso de Dilema Crítico"* (3 pacientes vs. 1 cama).
-  - En la **Pestaña 1 (Tablero de Pacientes)**: Mostrar cómo Jorge Valencia es clasificado en Prioridad 4 (Paliativo) por futilidad, evitando la distanasia.
-  - En la **Pestaña 3 (Dilemas Éticos Comparados)**: Demostrar el cambio en tiempo real al alternar entre Utilitarismo (gana Carlos Mendoza), Deontología (gana Elena Restrepo por llegada) y Consenso Constitucional (gana Elena por empate técnico + protección reforzada).
-- **Minuto 6:00 - 8:00 | Simulación Temporal Multi-Ronda (0h -> 24h) y Rotación de Camas:**
-  - Activar el toggle *"⏱️ Modo Simulación Dinámica Temporal"* en la barra lateral.
-  - Mover el selector temporal a **12 Horas**: Observar cómo Elena Restrepo muestra franca mejoría ($\text{SOFA} \le 3$, extubada) y es trasladada a Cuidados Intermedios, liberando la cama UCI y el ventilador.
+  - Mostrar la interfaz limpia y clara con tema hospitalario nativo, censo de pacientes y tarjetas de signos vitales (Royal College of Physicians 2017).
+- **Minuto 3:00 - 5:00 | Demostración en Vivo del Caso Crítico y Dilemas Éticos:**
+  - En el panel izquierdo, presionar *"Cargar escenario"* con el caso *"Dilema Crítico (3 vs 1)"*.
+  - En la pestaña **Resumen**: Observar la asignación inmediata de cama UCI, la remisión CRUE garantizada y la adecuación del esfuerzo en Prioridad 4 para evitar distanasia.
+  - En la pestaña **Marcos éticos**: Demostrar en vivo cómo cambia la asignación entre Utilitarismo (Carlos Mendoza), Deontología (Elena Restrepo por llegada) y Consenso Constitucional (Elena por empate técnico + protección reforzada).
+- **Minuto 5:00 - 7:00 | Simulación Temporal Multi-Ronda (0h -> 24h) y Rotación de Camas:**
+  - Activar el toggle *"Simulación temporal"* en el panel lateral.
+  - Mover el selector temporal a **12 h**: Observar cómo Elena Restrepo muestra franca mejoría ($\text{SOFA} \le 3$, extubada) y es trasladada a Cuidados Intermedios, liberando la cama UCI y el ventilador.
   - Mostrar cómo el comité reasigna inmediatamente la cama liberada a Carlos Mendoza (admitido desde la lista de espera CRUE).
   - Mostrar el gráfico interactivo de flujo asistencial en Plotly.
-- **Minuto 8:00 - 10:00 | Cierre Normativo, Explicabilidad y Responsabilidad:**
-  - Mostrar las trazas XAI en la **Pestaña 4** y el Marco Legal en la **Pestaña 5** con la matriz de responsabilidad civil (Desarrollador vs. Hospital vs. Médico).
-  - Enfatizar el principio *Human-in-the-Loop* de la Ley 23 de 1981 y las directrices de la UNESCO para la ética en IA.
+- **Minuto 7:00 - 8:30 | Explicabilidad Paso a Paso (XAI) y Estabilidad Monte Carlo:**
+  - En la pestaña **Explicación**: Seleccionar un paciente y mostrar la cadena lógica paso a paso `[Datos clínicos] -> [Reglas aplicadas] -> [Recursos] -> [Auditoría] -> [Decisión]`.
+  - En la pestaña **Comité**: Mostrar el análisis de sensibilidad estocástica de Monte Carlo (1.000 iteraciones) que certifica la estabilidad de la recomendación ante ruido instrumental.
+- **Minuto 8:30 - 10:00 | Nota Clínica (NLG) y Cierre Normativo:**
+  - En la pestaña **Nota clínica**: Mostrar la generación automática de la nota médica oficial conforme a la Resolución 1995 de 1999, lista para copiar o descargar.
+  - En la pestaña **Marco legal**: Resaltar la matriz de responsabilidad civil y el principio *Human-in-the-Loop* (Ley 23 de 1981 y directrices de la UNESCO).
 
 ---
 

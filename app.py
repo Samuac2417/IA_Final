@@ -1,9 +1,20 @@
 """
-app.py — Consola Hospitalaria de Decisión Clínico-Bioética (CDSS-XAI)
+app.py — Consola de Triage Ético UCI (Comité Clínico-Bioético Multiagente)
 =============================================================================
 
-Sistema Experto Multiagente Simbólico para el Triage en Cuidados Intensivos (UCI)
-y Asignación Ética de Recursos Críticos.
+Interfaz Streamlit del Sistema Experto Multiagente Simbólico para el triage en
+Cuidados Intensivos (UCI) y la asignación ética de recursos críticos.
+
+Principios de diseño de esta interfaz:
+    * Primero la respuesta: la recomendación del comité se ve sin hacer scroll.
+    * Revelación progresiva: el detalle técnico (reglas, trazas, normas) está a
+      un clic, dentro de pestañas y desplegables, nunca encima del resultado.
+    * Paleta clara y de bajo contraste (ver .streamlit/config.toml) con color
+      usado solo para comunicar estado clínico.
+
+Ejecución:
+    cd triage_multiagent_system
+    streamlit run app.py
 
 Universidad Católica Luis Amigó · Curso de Análisis de Inteligencia Artificial.
 """
@@ -13,7 +24,8 @@ from __future__ import annotations
 import html
 import json
 import textwrap
-from typing import Dict, List
+from dataclasses import asdict
+from typing import Dict, List, Optional
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -22,367 +34,123 @@ import streamlit as st
 from core import knowledge_base as kb
 from core.coordinator import ConsensusCoordinator
 from core.models import (
-    ETIQUETAS_PRIORIDAD, Etapa, ModoEtico, Paciente, RecursoHospitalario, ReporteRobustez, ResultadoComite, TrazaInferencia,
+    ETIQUETAS_PRIORIDAD, DecisionFinal, Etapa, ModoEtico, Paciente, RecursoHospitalario, ReporteRobustez,
+    ResultadoComite, TrazaInferencia,
 )
 from core.nlg_generator import ClinicalNarrativeGenerator
 
 # =============================================================================
-# Configuración de Página y Paleta Visual Hospitalaria
+# Configuración de página
 # =============================================================================
 st.set_page_config(
-    page_title="Hospital CDSS · Triage Ético UCI",
-    page_icon="🏥",
+    page_title="Triage Ético UCI · Comité Clínico-Bioético",
+    page_icon=":material/local_hospital:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Paleta semántica médica suave (no saturada, accesible, profesional)
-COLOR_P1 = "#dc2626"       # Rojo suave / prioridad inmediata
-COLOR_P2 = "#d97706"       # Ámbar / monitoreo intensivo
-COLOR_P3 = "#2563eb"       # Azul / hospitalización general
-COLOR_P4 = "#7c3aed"       # Púrpura / cuidado paliativo
-COLOR_OK = "#059669"       # Verde esmeralda clínico / validado o asignado
-COLOR_WARN = "#d97706"     # Advertencia / observaciones
-COLOR_DANGER = "#dc2626"   # Veto / objeción crítica
-COLOR_NEUTRAL = "#475569"  # Gris pizarra neutro
-
-PRIORIDAD_COLOR = {1: COLOR_P1, 2: COLOR_P2, 3: COLOR_P3, 4: COLOR_P4}
-NIVEL_COLOR = {"INFO": "#0284c7", "OK": COLOR_OK, "ALERTA": COLOR_WARN, "OBJECION": "#ea580c", "CRITICO": COLOR_DANGER}
-NIVEL_ICONO = {"INFO": "ℹ️", "OK": "✅", "ALERTA": "⚠️", "OBJECION": "🛑", "CRITICO": "🚨"}
-VALIDACION_COLOR = {
-    "VALIDADO": COLOR_OK,
-    "VALIDADO CON OBSERVACIONES": COLOR_WARN,
-    "OBJETADO": "#ea580c",
-    "VETO CONSTITUCIONAL": COLOR_DANGER,
+# =============================================================================
+# Sistema de diseño (tokens de color y etiquetas legibles)
+# =============================================================================
+# Colores suaves para gráficos y acentos (no saturados).
+HEX = {
+    "teal": "#0E7C7B", "verde": "#3FA37C", "ambar": "#E3A23B", "rojo": "#D9605A",
+    "azul": "#5B8FD1", "violeta": "#8C7BC4", "gris": "#94A3B8", "texto": "#1E293B", "muted": "#64748B",
 }
-AGENTE_INFO = {
+
+PRIORIDAD_UI = {
+    1: {"corto": "P1 · Crítico", "badge": "red", "hex": HEX["rojo"]},
+    2: {"corto": "P2 · Vigilancia intensiva", "badge": "orange", "hex": HEX["ambar"]},
+    3: {"corto": "P3 · Estable", "badge": "blue", "hex": HEX["azul"]},
+    4: {"corto": "P4 · Paliativo", "badge": "violet", "hex": HEX["violeta"]},
+}
+
+VALIDACION_UI = {
+    "VALIDADO": ("green", ":material/verified:", "Validado"),
+    "VALIDADO CON OBSERVACIONES": ("orange", ":material/info:", "Validado con observaciones"),
+    "OBJETADO": ("orange", ":material/report:", "Objetado"),
+    "VETO CONSTITUCIONAL": ("red", ":material/gpp_bad:", "Veto constitucional"),
+}
+
+NIVEL_HEX = {"INFO": "#A3B1C2", "OK": HEX["verde"], "ALERTA": HEX["ambar"], "OBJECION": "#E07B3C",
+             "CRITICO": HEX["rojo"]}
+
+AGENTE_UI = {
     "ClinicalTriageAgent": {
-        "icono": "🩺",
-        "titulo": "Medicina Crítica & Triage",
-        "color": "#0284c7",
-        "sub": "Evaluación fisiológica objetiva, gravedad SOFA y reversibilidad",
+        "icono": ":material/stethoscope:", "titulo": "Evaluación clínica", "color": "blue",
+        "sub": "Gravedad fisiológica, reversibilidad (SOFA) y prioridad P1–P4.",
     },
     "ResourceManagerAgent": {
-        "icono": "🏥",
-        "titulo": "Gestión de Capacidad y Camas",
-        "color": "#0f766e",
-        "sub": "Monitoreo de inventario físico, camas UCI y soporte ventilatorio",
+        "icono": ":material/bed:", "titulo": "Gestión de camas", "color": "green",
+        "sub": "Contrasta la demanda crítica con camas UCI y ventiladores.",
     },
     "BioethicsAuditAgent": {
-        "icono": "⚖️",
-        "titulo": "Auditoría Bioética y Legal",
-        "color": "#6366f1",
-        "sub": "Control constitucional, bloqueo de edadismo y garantía de no abandono",
+        "icono": ":material/balance:", "titulo": "Auditoría bioética y legal", "color": "violet",
+        "sub": "Bloquea edadismo, exige plan de no abandono y valida la legalidad.",
     },
     "ConsensusCoordinator": {
-        "icono": "🧭",
-        "titulo": "Coordinador de Consenso",
-        "color": "#0f172a",
-        "sub": "Integración multidisciplinaria, desempate transparente y acta oficial",
+        "icono": ":material/hub:", "titulo": "Coordinador de consenso", "color": "gray",
+        "sub": "Integra los dictámenes y aplica el marco ético activo.",
     },
 }
 
-# Inyección de estilos CSS de nivel clínico profesional
+MARCO_CORTO = {
+    ModoEtico.UTILITARISTA_CLINICO.value: "Utilitarista",
+    ModoEtico.DEONTOLOGICO_IGUALITARIO.value: "Deontológico",
+    ModoEtico.CONSENSO_CONSTITUCIONAL_COLOMBIA.value: "Constitucional",
+}
+
+ETAPA_UI = {
+    Etapa.HECHO.value: "Datos clínicos del paciente",
+    Etapa.REGLA.value: "Reglas clínicas aplicadas",
+    Etapa.RECURSO.value: "Disponibilidad de recursos",
+    Etapa.AUDITORIA.value: "Auditoría ética y legal",
+    Etapa.DECISION.value: "Recomendación final",
+}
+
+# Estilos mínimos: solo lo que el tema nativo de Streamlit no cubre.
 st.markdown(
     """
     <style>
-      /* Tipografía y contenedor general */
-      @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
-      
-      html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      }
-      
-      .block-container {
-        padding-top: 1.2rem;
-        padding-bottom: 2.5rem;
-        max-width: 1380px;
-      }
-      
-      /* Encabezado Hospitalario Institucional */
-      .hospital-navbar {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 18px 24px;
-        margin-bottom: 16px;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: space-between;
-        align-items: center;
-        border-left: 6px solid #0284c7;
-      }
-      .hospital-navbar .brand-dept {
-        font-size: 0.75rem;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #0284c7;
-        margin-bottom: 2px;
-      }
-      .hospital-navbar h1 {
-        font-size: 1.45rem;
-        font-weight: 800;
-        color: #0f172a;
-        margin: 0;
-        line-height: 1.25;
-      }
-      .hospital-navbar p {
-        font-size: 0.86rem;
-        color: #64748b;
-        margin: 4px 0 0 0;
-      }
-      .hospital-navbar .status-tag {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 12px;
-        background: #f0fdf4;
-        border: 1px solid #bbf7d0;
-        border-radius: 999px;
-        font-size: 0.78rem;
-        font-weight: 600;
-        color: #166534;
-      }
+      .block-container {padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1280px;}
+      h1, h2, h3 {letter-spacing: -0.01em;}
+      [data-testid="stMetricLabel"] p {color: #64748B;}
+      .stTabs [data-baseweb="tab-list"] {gap: 0.35rem;}
+      .stTabs [data-baseweb="tab"] {padding-left: 0.6rem; padding-right: 0.6rem;}
 
-      /* Alertas de Estado Hospitalario */
-      .status-alert {
-        border-radius: 10px;
-        padding: 14px 18px;
-        margin-bottom: 16px;
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-      }
-      .status-alert.critical {
-        background: #fef2f2;
-        border: 1px solid #fecaca;
-        border-left: 5px solid #dc2626;
-        color: #991b1b;
-      }
-      .status-alert.normal {
-        background: #f0fdf4;
-        border: 1px solid #bbf7d0;
-        border-left: 5px solid #16a34a;
-        color: #166534;
-      }
-      .status-alert-title {
-        font-weight: 700;
-        font-size: 0.95rem;
-        margin-bottom: 2px;
-      }
-      .status-alert-desc {
-        font-size: 0.86rem;
-        opacity: 0.92;
-        line-height: 1.4;
-      }
+      .eyebrow {font-size: .78rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+                color: #0E7C7B; margin-bottom: -0.4rem;}
 
-      /* Tarjeta de Resumen Ejecutivo de la Deliberación */
-      .exec-card {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 18px 20px;
-        margin-bottom: 20px;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-      }
-      .exec-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-bottom: 1px solid #f1f5f9;
-        padding-bottom: 10px;
-        margin-bottom: 12px;
-      }
-      .exec-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: #0f172a;
-      }
-      
-      /* Tarjetas de Paciente (Estilo Ficha Clínica de Urgencias) */
-      .patient-board-card {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 16px;
-        margin-bottom: 14px;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
-        transition: border-color 0.15s ease, box-shadow 0.15s ease;
-      }
-      .patient-board-card:hover {
-        border-color: #cbd5e1;
-        box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.06);
-      }
-      .patient-name-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 8px;
-      }
-      .patient-title {
-        font-size: 1.02rem;
-        font-weight: 700;
-        color: #0f172a;
-      }
-      .patient-meta {
-        font-size: 0.82rem;
-        color: #64748b;
-      }
-      
-      /* Chips de signos vitales */
-      .vital-chip {
-        display: inline-flex;
-        align-items: center;
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 6px;
-        padding: 3px 8px;
-        font-size: 0.77rem;
-        font-weight: 600;
-        color: #334155;
-        margin: 2px 4px 2px 0;
-      }
-      .vital-chip b {
-        color: #0f172a;
-        margin-left: 3px;
-      }
-      .vital-chip.alert {
-        background: #fffbeb;
-        border-color: #fde68a;
-        color: #92400e;
-      }
-      .vital-chip.critical {
-        background: #fef2f2;
-        border-color: #fecaca;
-        color: #991b1b;
-      }
+      .callout {border-radius: 10px; padding: 12px 16px; margin: 4px 0 14px; font-size: .95rem; line-height: 1.5;}
+      .callout.warn {background: #FFF8EC; border: 1px solid #F5E1B8; color: #6B4A0F;}
+      .callout.ok   {background: #EFF8F4; border: 1px solid #D2EBDF; color: #1F5A43;}
 
-      /* Insignias (Pills) limpias */
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        padding: 3px 10px;
-        border-radius: 999px;
-        font-size: 0.74rem;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-      }
-      .pill-assigned {
-        background: #ecfdf5;
-        color: #065f46;
-        border: 1px solid #a7f3d0;
-      }
-      .pill-waiting {
-        background: #fffbeb;
-        color: #92400e;
-        border: 1px solid #fde68a;
-      }
-      .pill-palliative {
-        background: #faf5ff;
-        color: #6b21a8;
-        border: 1px solid #e9d5ff;
-      }
-      
-      /* Tarjetas de Agentes Especialistas */
-      .agent-panel {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 16px 18px;
-        height: 100%;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
-      }
-      .agent-panel-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding-bottom: 10px;
-        margin-bottom: 12px;
-        border-bottom: 1px solid #f1f5f9;
-      }
-      .agent-avatar {
-        font-size: 1.5rem;
-        background: #f1f5f9;
-        width: 40px;
-        height: 40px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 8px;
-      }
-      .agent-role-title {
-        font-size: 0.95rem;
-        font-weight: 700;
-        color: #0f172a;
-        margin: 0;
-      }
-      .agent-role-sub {
-        font-size: 0.77rem;
-        color: #64748b;
-        margin: 0;
-      }
-      .verdict-box {
-        border-radius: 8px;
-        padding: 10px 12px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        margin: 10px 0;
-        line-height: 1.35;
-      }
+      .pname {font-size: 1.08rem; font-weight: 600; color: #1E293B; line-height: 1.3;}
+      .pmeta {font-size: .82rem; color: #64748B; margin-bottom: 2px;}
 
-      /* Trazas XAI limpias */
-      .traza-item {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-left: 4px solid #64748b;
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin: 6px 0;
-        font-size: 0.84rem;
-        line-height: 1.45;
-      }
-      .traza-item .head {
-        font-weight: 700;
-        font-size: 0.78rem;
-        color: #475569;
-        margin-bottom: 4px;
-      }
-      .traza-item .code-box {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.76rem;
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        padding: 2px 6px;
-        border-radius: 4px;
-        color: #0f172a;
-      }
-      .traza-item .foundation {
-        margin-top: 5px;
-        font-size: 0.77rem;
-        color: #64748b;
-      }
+      .vitals {display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 2px 0 6px;}
+      .vital {background: #F6F8FA; border-radius: 8px; padding: 6px 8px;}
+      .vital .lbl {font-size: .68rem; color: #64748B; text-transform: uppercase; letter-spacing: .04em;}
+      .vital .val {font-size: 1rem; font-weight: 600; color: #1E293B;}
+      .vital.alerta {background: #FFF6E6;} .vital.alerta .val {color: #A15C07;}
+      .vital.critico {background: #FDEEEE;} .vital.critico .val {color: #B93A35;}
 
-      /* Tarjeta de Marco Filosófico */
-      .framework-card {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 18px;
-        height: 100%;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
-      }
-      .framework-card.active {
-        border: 2px solid #059669;
-        background: #fbfdfc;
-      }
+      .names {font-size: 1.12rem; font-weight: 600; color: #1E293B; margin: 2px 0 4px; line-height: 1.45;}
+      .verdict {background: #F6F8FA; border-radius: 8px; padding: 10px 12px; font-size: .9rem; color: #334155;
+                margin: 4px 0 8px; line-height: 1.45;}
 
-      /* Ajustes para tablas */
-      .stDataFrame {
-        border-radius: 10px;
-        overflow: hidden;
-      }
+      .step {display: flex; align-items: center; gap: 10px; margin: 18px 0 4px;}
+      .step .num {width: 26px; height: 26px; border-radius: 50%; background: #E3F1F0; color: #0E7C7B;
+                  font-weight: 700; font-size: .85rem; display: flex; align-items: center; justify-content: center;}
+      .step .ttl {font-weight: 600; color: #1E293B;}
+
+      .trace {border-left: 3px solid #CBD5E1; background: #FAFBFC; border-radius: 0 8px 8px 0;
+              padding: 8px 12px; margin: 6px 0 6px 13px; font-size: .88rem; line-height: 1.5; color: #334155;}
+      .trace .code {font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .74rem;
+                    color: #475569; background: #EEF2F6; padding: 1px 6px; border-radius: 4px; margin-right: 6px;}
+      .trace .ag {font-size: .76rem; color: #64748B;}
+      .trace .cond {color: #64748B; font-size: .82rem; margin-top: 2px;}
+      .trace .fund {color: #94A3B8; font-size: .78rem; margin-top: 2px;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -390,7 +158,7 @@ st.markdown(
 
 
 # =============================================================================
-# Gestión de Estado y Callbacks
+# Estado de sesión y callbacks
 # =============================================================================
 def _init_estado() -> None:
     if "pacientes" not in st.session_state:
@@ -420,6 +188,8 @@ def cb_retirar() -> None:
     retirar = set(st.session_state.get("retirar_ids", []))
     st.session_state.pacientes = [p for p in st.session_state.pacientes if p.id not in retirar]
     st.session_state.retirar_ids = []
+    if retirar:
+        st.session_state.aviso = f"{len(retirar)} paciente(s) retirado(s)."
 
 
 def _siguiente_id() -> str:
@@ -434,95 +204,115 @@ _init_estado()
 
 
 # =============================================================================
-# Funciones Auxiliares de Presentación Visual
+# Cálculo (con caché para que la interfaz responda al instante)
 # =============================================================================
-def badge(texto: str, bg_color: str, text_color: str = "#ffffff") -> str:
-    return (
-        f'<span style="display:inline-block; padding:2px 8px; border-radius:999px; '
-        f'background:{bg_color}; color:{text_color}; font-size:0.75rem; font-weight:700; '
-        f'letter-spacing:0.02em; margin:2px 4px 2px 0;">{html.escape(texto)}</span>'
-    )
+def _firma_pacientes(pacientes: List[Paciente]) -> str:
+    return json.dumps([asdict(p) for p in pacientes], sort_keys=True, ensure_ascii=False, default=str)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def analisis_monte_carlo(_pacientes: List[Paciente], firma: str, camas: int, ventiladores: int,
+                         camas_totales: int, modo: str, umbral: int) -> Dict[str, ReporteRobustez]:
+    """Análisis de sensibilidad Monte Carlo (1000 iteraciones, semilla 42), cacheado por escenario."""
+    estado_mc = RecursoHospitalario(camas_uci_totales=camas_totales, camas_uci_disponibles=camas,
+                                    ventiladores_disponibles=ventiladores, modo_etico_activo=modo)
+    return ConsensusCoordinator(umbral_empate_sofa=umbral).ejecutar_analisis_monte_carlo(
+        _pacientes, estado_mc, n_iteraciones=1000, semilla=42)
+
+
+# =============================================================================
+# Utilidades de presentación
+# =============================================================================
+def esc(texto: object) -> str:
+    return html.escape(str(texto))
 
 
 def badge_prioridad(p: int) -> str:
-    labels = {
-        1: ("P1 · Crítico Inestable (UCI Inmediata)", "#fef2f2", "#991b1b", "#fecaca"),
-        2: ("P2 · Monitoreo Intensivo / Intermedios", "#fffbeb", "#92400e", "#fde68a"),
-        3: ("P3 · Hospitalización General", "#eff6ff", "#1e40af", "#bfdbfe"),
-        4: ("P4 · Cuidado Paliativo Integral", "#faf5ff", "#6b21a8", "#e9d5ff"),
-    }
-    lbl, bg, fg, border = labels.get(p, (f"P{p}", "#f1f5f9", "#334155", "#cbd5e1"))
-    return (
-        f'<span style="display:inline-flex; align-items:center; padding:3px 10px; border-radius:999px; '
-        f'background:{bg}; color:{fg}; border:1px solid {border}; font-size:0.75rem; font-weight:700;">'
-        f'{html.escape(lbl)}</span>'
-    )
+    ui = PRIORIDAD_UI.get(p, {"corto": f"P{p}", "badge": "gray"})
+    return f":{ui['badge']}-badge[{ui['corto']}]"
 
 
 def badge_validacion(v: str) -> str:
-    estilos = {
-        "VALIDADO": ("#ecfdf5", "#065f46", "#a7f3d0", "✅"),
-        "VALIDADO CON OBSERVACIONES": ("#fffbeb", "#92400e", "#fde68a", "⚠️"),
-        "OBJETADO": ("#fff7ed", "#9a3412", "#fed7aa", "🛑"),
-        "VETO CONSTITUCIONAL": ("#fef2f2", "#991b1b", "#fecaca", "🚨"),
-    }
-    bg, fg, border, icon = estilos.get(v, ("#f8fafc", "#334155", "#cbd5e1", "ℹ️"))
-    return (
-        f'<span style="display:inline-flex; align-items:center; gap:4px; padding:3px 10px; border-radius:999px; '
-        f'background:{bg}; color:{fg}; border:1px solid {border}; font-size:0.75rem; font-weight:700;">'
-        f'{icon} {html.escape(v)}</span>'
+    color, icono, etiqueta = VALIDACION_UI.get(v, ("gray", ":material/info:", v.capitalize()))
+    return f":{color}-badge[{icono} {etiqueta}]"
+
+
+def badge_news2(p: Paciente) -> str:
+    puntaje, nivel, _ = kb.calcular_news2(p)
+    color = {"BAJO": "green", "MEDIO": "orange"}.get(nivel, "red")
+    return f":{color}-badge[NEWS2 {puntaje} · riesgo {nivel.lower()}]"
+
+
+def destino_ui(d: DecisionFinal) -> Dict[str, str]:
+    """Traduce la decisión técnica a una etiqueta corta y amigable."""
+    destino = (d.destino or "").upper()
+    if d.asignado_uci:
+        extra = " + ventilador" if d.asignado_ventilador else ""
+        return {"label": f"Cama UCI asignada{extra}", "corto": "UCI", "icono": ":material/bed:",
+                "color": "green", "cat": "uci"}
+    if "PALIATIVO" in destino or d.prioridad == 4:
+        return {"label": "Cuidado paliativo integral", "corto": "Paliativo", "icono": ":material/spa:",
+                "color": "violet", "cat": "otros"}
+    if "CRUE" in destino or d.prioridad == 1:
+        pos = f" (puesto #{d.posicion_ranking})" if d.posicion_ranking else ""
+        return {"label": f"En espera · remisión CRUE{pos}", "corto": "Espera · CRUE",
+                "icono": ":material/ambulance:", "color": "orange", "cat": "crue"}
+    if "INTERMEDIOS" in destino or d.prioridad == 2:
+        return {"label": "Cuidados intermedios", "corto": "Intermedios", "icono": ":material/monitor_heart:",
+                "color": "blue", "cat": "otros"}
+    if "HOSPITALIZACI" in destino or d.prioridad == 3:
+        return {"label": "Hospitalización general", "corto": "Hospitalización", "icono": ":material/home_health:",
+                "color": "gray", "cat": "otros"}
+    return {"label": d.destino.capitalize(), "corto": d.destino.capitalize(), "icono": ":material/info:",
+            "color": "gray", "cat": "otros"}
+
+
+def _clase_vital(valor: float, critico: bool, alerta: bool) -> str:
+    return "critico" if critico else ("alerta" if alerta else "")
+
+
+def html_vitales(p: Paciente) -> str:
+    items = [
+        ("SOFA", p.escala_sofa, _clase_vital(p.escala_sofa, p.escala_sofa >= 12, p.escala_sofa >= 7)),
+        ("PaFi", p.pafi, _clase_vital(p.pafi, p.pafi <= 100, p.pafi <= 200)),
+        ("SatO₂", f"{p.sat_o2:g}%", _clase_vital(p.sat_o2, p.sat_o2 < 85, p.sat_o2 < 92)),
+        ("Glasgow", p.glasgow, _clase_vital(p.glasgow, p.glasgow <= 8, p.glasgow <= 12)),
+    ]
+    celdas = "".join(
+        f'<div class="vital {c}"><div class="lbl">{esc(lbl)}</div><div class="val">{esc(val)}</div></div>'
+        for lbl, val, c in items
     )
+    return f'<div class="vitals">{celdas}</div>'
 
 
-def destino_asistencial_badge(asignado_uci: bool, prioridad: int, ranking: int | None = None) -> str:
-    if asignado_uci:
-        return (
-            '<span style="display:inline-flex; align-items:center; gap:5px; padding:4px 12px; '
-            'border-radius:8px; background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; '
-            'font-weight:700; font-size:0.82rem;">🛏️ CAMA UCI ASIGNADA</span>'
-        )
-    if prioridad == 1:
-        rank_txt = f" (Posición #{ranking})" if ranking else ""
-        return (
-            f'<span style="display:inline-flex; align-items:center; gap:5px; padding:4px 12px; '
-            f'border-radius:8px; background:#fffbeb; color:#92400e; border:1px solid #fde68a; '
-            f'font-weight:700; font-size:0.82rem;">🚑 EXPANSIÓN + TRASLADO CRUE{rank_txt}</span>'
-        )
-    if prioridad == 2:
-        return (
-            '<span style="display:inline-flex; align-items:center; gap:5px; padding:4px 12px; '
-            'border-radius:8px; background:#eff6ff; color:#1e40af; border:1px solid #bfdbfe; '
-            'font-weight:700; font-size:0.82rem;">🩺 CUIDADOS INTERMEDIOS</span>'
-        )
-    if prioridad == 3:
-        return (
-            '<span style="display:inline-flex; align-items:center; gap:5px; padding:4px 12px; '
-            'border-radius:8px; background:#f8fafc; color:#334155; border:1px solid #cbd5e1; '
-            'font-weight:700; font-size:0.82rem;">🏠 HOSPITALIZACIÓN GENERAL</span>'
-        )
-    return (
-        '<span style="display:inline-flex; align-items:center; gap:5px; padding:4px 12px; '
-        'border-radius:8px; background:#faf5ff; color:#6b21a8; border:1px solid #e9d5ff; '
-        'font-weight:700; font-size:0.82rem;">🕊️ CUIDADO PALIATIVO INTEGRAL</span>'
-    )
-
-
-def render_traza_moderna(t: TrazaInferencia, mostrar_agente: bool = True) -> None:
-    color = NIVEL_COLOR.get(t.nivel, "#64748b")
-    info_agente = AGENTE_INFO.get(t.agente, {"icono": "🤖", "titulo": t.agente, "color": "#64748b"})
-    icono = NIVEL_ICONO.get(t.nivel, "•")
-    
-    agente_header = f"{info_agente['icono']} {info_agente['titulo']} · " if mostrar_agente else ""
+def render_traza(t: TrazaInferencia, mostrar_agente: bool = True) -> None:
+    color = NIVEL_HEX.get(t.nivel, "#CBD5E1")
+    agente = AGENTE_UI.get(t.agente, {}).get("titulo", t.agente)
     st.markdown(
-        f'<div class="traza-item" style="border-left-color:{color}">'
-        f'<div class="head">{icono} {html.escape(agente_header)}<span class="code-box">{html.escape(t.regla_id)}</span> '
-        f'· <b>{html.escape(t.etapa)}</b></div>'
-        f'<div><b>Condición:</b> {html.escape(t.condicion_evaluada)}</div>'
-        f'<div style="margin-top:3px;"><b>Conclusión:</b> {html.escape(t.conclusion)}</div>'
-        f'<div class="foundation">📚 <i>Fundamento: {html.escape(t.fundamento_normativo_o_medico)}</i></div>'
+        f'<div class="trace" style="border-left-color:{color}">'
+        f'<div><span class="code">{esc(t.regla_id)}</span>'
+        f'{f"<span class=ag>{esc(agente)}</span>" if mostrar_agente else ""}</div>'
+        f'<div>{esc(t.conclusion)}</div>'
+        f'<div class="cond">Condición evaluada: {esc(t.condicion_evaluada)}</div>'
+        f'<div class="fund">Fundamento: {esc(t.fundamento_normativo_o_medico)}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
+
+
+def estilo_figura(fig: go.Figure, titulo: str, alto: int) -> go.Figure:
+    fig.update_layout(
+        title=dict(text=titulo, font=dict(size=14, color=HEX["texto"]), x=0, xanchor="left"),
+        height=alto, template="plotly_white", margin=dict(t=46, b=8, l=8, r=8),
+        font=dict(size=12, color="#475569"), legend=dict(orientation="h", y=-0.2, x=0),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_xaxes(gridcolor="#EEF2F6", zeroline=False)
+    fig.update_yaxes(gridcolor="#EEF2F6", zeroline=False)
+    return fig
+
+
+PLOTLY_CONFIG = {"displayModeBar": False}
 
 
 def _dot_escape(texto: str, ancho: int = 38) -> str:
@@ -531,15 +321,17 @@ def _dot_escape(texto: str, ancho: int = 38) -> str:
 
 
 def arbol_dot(r: ResultadoComite, pid: str) -> str:
+    """Árbol de inferencia XAI en lenguaje DOT (Graphviz renderizado por Streamlit)."""
     p = r.paciente(pid)
     cadena = r.cadena_xai(pid)
     lineas = [
-        'digraph G {',
-        'rankdir=TB; nodesep=0.25; ranksep=0.35;',
-        'node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, fillcolor="#ffffff", color="#cbd5e1"];',
-        'edge [color="#94a3b8", arrowsize=0.7];',
-        f'root [label="{_dot_escape(p.nombre + " · " + p.id, 26)}", shape=ellipse, fillcolor="#0284c7", '
-        f'fontcolor="white", fontsize=11, style="filled"];',
+        "digraph G {",
+        'rankdir=TB; nodesep=0.25; ranksep=0.35; bgcolor="transparent";',
+        'node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, fillcolor="#FFFFFF", '
+        'color="#D5DDE6", fontcolor="#334155"];',
+        'edge [color="#B8C4D2", arrowsize=0.6];',
+        f'root [label="{_dot_escape(p.nombre + " · " + p.id, 26)}", shape=ellipse, fillcolor="{HEX["teal"]}", '
+        f'fontcolor="white", fontsize=11, color="{HEX["teal"]}"];',
     ]
     anterior = "root"
     for i, etapa in enumerate(e.value for e in Etapa):
@@ -547,218 +339,204 @@ def arbol_dot(r: ResultadoComite, pid: str) -> str:
         if not trazas:
             continue
         hub = f"etapa{i}"
-        lineas.append(f'{hub} [label="{etapa}", shape=hexagon, fillcolor="#f1f5f9", fontsize=10, color="#94a3b8"];')
-        lineas.append(f"{anterior} -> {hub} [penwidth=1.8, color=\"#0284c7\"];")
+        lineas.append(f'{hub} [label="{ETAPA_UI.get(etapa, etapa)}", fillcolor="#EEF6F6", color="#BFDCDB", '
+                      f'fontsize=10, fontcolor="#0E5C5B"];')
+        lineas.append(f'{anterior} -> {hub} [penwidth=1.6, color="{HEX["teal"]}"];')
         for j, t in enumerate(trazas):
             nodo = f"t{i}_{j}"
-            color = NIVEL_COLOR.get(t.nivel, "#64748b")
+            color = NIVEL_HEX.get(t.nivel, "#CBD5E1")
             concl = t.conclusion if len(t.conclusion) < 95 else t.conclusion[:92] + "..."
-            lineas.append(
-                f'{nodo} [label="{_dot_escape(t.regla_id)}\\n{_dot_escape(concl)}", color="{color}", '
-                f'penwidth=1.5, fillcolor="#f8fafc"];'
-            )
+            lineas.append(f'{nodo} [label="{_dot_escape(t.regla_id)}\\n{_dot_escape(concl)}", color="{color}", '
+                          f'penwidth=1.4, fillcolor="#FAFBFC"];')
             lineas.append(f"{hub} -> {nodo};")
         anterior = hub
     lineas.append("}")
     return "\n".join(lineas)
 
 
+def paso(numero: int, titulo: str) -> None:
+    st.markdown(f'<div class="step"><div class="num">{numero}</div><div class="ttl">{esc(titulo)}</div></div>',
+                unsafe_allow_html=True)
+
+
 # =============================================================================
-# Panel Lateral (Sidebar de Control Asistencial)
+# Diálogo: agregar paciente (antes era un formulario largo en la barra lateral)
 # =============================================================================
-with st.sidebar:
-    st.markdown(
-        '<div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">'
-        '<span style="font-size:1.6rem;">🏥</span>'
-        '<div><h3 style="margin:0; font-size:1.15rem; color:#0f172a;">Control Asistencial</h3>'
-        '<span style="font-size:0.75rem; color:#64748b;">Consola de Triage Crítico</span></div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    # 1. Escenarios clínicos
-    st.markdown("#### ⚡ Casos de Demostración")
-    st.button(
-        "🚨 Cargar Caso de Dilema Crítico (3 vs 1)",
-        type="primary",
-        use_container_width=True,
-        on_click=cb_cargar_escenario,
-        args=("dilema",),
-        help="Caso principal: Carlos (joven), Elena (adulta mayor vulnerable) y Jorge (terminal) compiten por 1 cama UCI.",
-    )
-
-    with st.expander("📂 Otros escenarios clínicos precargados", expanded=False):
-        otro = st.selectbox(
-            "Seleccionar escenario",
-            [k for k in kb.ESCENARIOS if k != "dilema"],
-            format_func=lambda k: kb.ESCENARIOS[k]["titulo"],
-            label_visibility="collapsed",
-        )
-        st.button("Cargar escenario seleccionado", use_container_width=True, on_click=cb_cargar_escenario, args=(otro,))
-
-    st.divider()
-
-    # 2. Recursos físicos
-    st.markdown("#### 🛏️ Disponibilidad de Recursos")
-    st.slider("Camas UCI disponibles", 0, 5, key="camas", help="Número de camas físicas de cuidados intensivos libres en este turno.")
-    st.slider("Ventiladores mecánicos libres", 0, 5, key="ventiladores", help="Ventiladores invasivos disponibles inmediatamente.")
-    with st.expander("Configuración de capacidad instalada", expanded=False):
-        st.slider("Camas UCI totales de la institución", 5, 40, key="camas_totales")
-
-    st.divider()
-
-    # 3. Marco ético
-    st.markdown("#### ⚖️ Marco Ético de Decisión")
-    modo_sel = st.radio(
-        "Marco filosófico activo",
-        [m.value for m in ModoEtico],
-        key="modo",
-        format_func=lambda v: kb.MARCOS_ETICOS[v]["nombre"],
-        label_visibility="collapsed",
-    )
-    
-    # Breve tarjeta descriptiva del marco activo en sidebar
-    info_marco_sb = kb.MARCOS_ETICOS[modo_sel]
-    st.caption(f"**Principio:** {info_marco_sb['principio']}")
-
-    with st.expander("⚙️ Parámetros avanzados de consenso", expanded=False):
-        st.slider(
-            "Umbral de empate técnico SOFA (±puntos)",
-            0, 3, key="umbral",
-            help="Diferencias de SOFA menores o iguales a este valor se consideran clínicamente indistinguibles. "
-                 "Permite activar criterios afirmativos de justicia constitucional.",
-        )
-        st.caption(f"Semilla pública de sorteo auditable: `{kb.SEMILLA_SORTEO_AUDITABLE}`")
-
-    st.divider()
-
-    # 4. Modo Simulación Dinámica Temporal
-    st.markdown("#### ⏱️ Simulación Dinámica Temporal")
-    simulacion_activa = st.toggle(
-        "Activar Simulación Multi-Ronda (0h → 24h)",
-        key="modo_simulacion_temporal",
-        help="Simula la evolución fisiológica a 6h, 12h y 24h, con liberación dinámica de camas UCI y reasignación auditada al paciente en espera.",
-    )
-    if simulacion_activa:
-        st.select_slider(
-            "Paso temporal de evaluación",
-            options=[0, 6, 12, 24],
-            format_func=lambda h: f"{h} horas" + (" (Ingreso)" if h == 0 else ""),
-            key="hora_simulacion",
-            help="Permite inspeccionar el estado del hospital y del comité en cada corte temporal.",
-        )
-
-    st.divider()
-
-    # 5. Ingreso de pacientes en vivo
-    st.markdown("#### ➕ Ingreso de Paciente en Vivo")
-    with st.form("form_paciente", clear_on_submit=True):
+@st.dialog("Agregar paciente a urgencias", width="large")
+def dialogo_agregar_paciente() -> None:
+    st.caption("Complete los datos clínicos básicos. Los signos vitales para NEWS2 son opcionales.")
+    with st.form("form_paciente", border=False):
         nombre = st.text_input("Nombre completo", placeholder="Ej. Mariana Duque")
-        col_f1, col_f2 = st.columns(2)
-        edad = col_f1.number_input("Edad", 0, 120, 48)
-        espera = col_f2.number_input("Llegó hace (min)", 0, kb.MINUTO_ACTUAL_TURNO, 15)
-        
-        sat = col_f1.number_input("SatO2 (%)", 50.0, 100.0, 86.0, step=0.5)
-        pafi = col_f2.number_input("PaFi", 40, 600, 160)
-        
-        sofa = col_f1.number_input("SOFA (0-24)", 0, 24, 6)
-        glasgow = col_f2.number_input("Glasgow (3-15)", 3, 15, 14)
-        
-        comorb = st.text_input("Comorbilidades (separadas por coma)", placeholder="Ej. Hipertensión, Asma")
-        vent = st.checkbox("Requiere soporte ventilatorio invasivo", value=True)
+        c1, c2, c3 = st.columns(3)
+        edad = c1.number_input("Edad (años)", 0, 120, 48)
+        espera = c2.number_input("Llegó hace (min)", 0, kb.MINUTO_ACTUAL_TURNO, 15)
+        glasgow = c3.number_input("Glasgow (3-15)", 3, 15, 14)
+        c4, c5, c6 = st.columns(3)
+        sat = c4.number_input("SatO₂ (%)", 50.0, 100.0, 86.0, step=0.5)
+        pafi = c5.number_input("PaFi", 40, 600, 160)
+        sofa = c6.number_input("SOFA (0-24)", 0, 24, 6)
+        comorb = st.text_input("Comorbilidades graves", placeholder="Separadas por coma. Ej. Hipertensión, Asma")
+
+        st.markdown("**Condiciones del paciente**")
+        vent = st.checkbox("Requiere ventilador mecánico", value=True)
         terminal = st.checkbox("Enfermedad terminal irreversible")
         vulnerable = st.checkbox("Sujeto de especial protección constitucional")
 
-        with st.expander("🩺 Signos Vitales para Tamizaje NEWS2 (RCP 2017)", expanded=False):
-            col_n1, col_n2 = st.columns(2)
-            fr = col_n1.number_input("Frecuencia Respiratoria (rpm)", 0, 80, 16)
-            pas = col_n2.number_input("Presión Sistólica (mmHg)", 30, 300, 120)
-            fc = col_n1.number_input("Frecuencia Cardíaca (lpm)", 20, 250, 75)
-            temp = col_n2.number_input("Temperatura (°C)", 25.0, 45.0, 36.8, step=0.1)
+        with st.expander("Signos vitales para NEWS2 (opcional)"):
+            n1, n2, n3 = st.columns(3)
+            fr = n1.number_input("Frecuencia respiratoria (rpm)", 0, 80, 16)
+            pas = n2.number_input("Presión sistólica (mmHg)", 30, 300, 120)
+            fc = n3.number_input("Frecuencia cardíaca (lpm)", 20, 250, 75)
+            n4, n5 = st.columns(2)
+            temp = n4.number_input("Temperatura (°C)", 25.0, 45.0, 36.8, step=0.1)
+            acvpu = n5.selectbox(
+                "Nivel de conciencia (ACVPU)", ["A", "C", "V", "P", "U"],
+                format_func=lambda x: {"A": "A · Alerta", "C": "C · Confusión nueva", "V": "V · Responde a la voz",
+                                       "P": "P · Responde al dolor", "U": "U · Inconsciente"}[x],
+            )
             o2_sup = st.checkbox("Oxígeno suplementario al ingreso")
-            acvpu = st.selectbox(
-                "Nivel de Conciencia (ACVPU)",
-                ["A", "C", "V", "P", "U"],
-                format_func=lambda x: {
-                    "A": "A - Alerta",
-                    "C": "C - Confusión nueva",
-                    "V": "V - Responde a la voz",
-                    "P": "P - Responde al dolor",
-                    "U": "U - Inconsciente",
-                }[x],
-            )
 
-        if st.form_submit_button("Ingresar a Urgencias", use_container_width=True):
-            try:
-                nuevo = Paciente(
-                    id=_siguiente_id(),
-                    nombre=nombre.strip() or "Paciente sin nombre",
-                    edad=int(edad),
-                    hora_llegada=kb.MINUTO_ACTUAL_TURNO - int(espera),
-                    sat_o2=float(sat),
-                    pafi=int(pafi),
-                    escala_sofa=int(sofa),
-                    glasgow=int(glasgow),
-                    requiere_ventilador=vent,
-                    comorbilidades_graves=[c.strip() for c in comorb.split(",") if c.strip()],
-                    enfermedad_terminal_irreversible=terminal,
-                    vulnerabilidad_social=vulnerable,
-                    descripcion="Paciente registrado manualmente en el censo actual.",
-                    frecuencia_respiratoria=int(fr),
-                    presion_sistolica=int(pas),
-                    frecuencia_cardiaca=int(fc),
-                    temperatura=float(temp),
-                    oxigeno_suplementario=bool(o2_sup),
-                    escala_acvpu=str(acvpu),
-                )
-                st.session_state.pacientes = st.session_state.pacientes + [nuevo]
-                st.session_state.aviso = f"Paciente {nuevo.id} ({nuevo.nombre}) admitido a urgencias."
-            except ValueError as exc:
-                st.error(str(exc))
+        enviado = st.form_submit_button("Ingresar a urgencias", type="primary", icon=":material/person_add:",
+                                        width="stretch")
 
-    if st.session_state.pacientes:
-        with st.expander("🗑️ Gestión y Retiro de Pacientes", expanded=False):
-            st.multiselect(
-                "Seleccionar pacientes a dar de alta/retirar",
-                [p.id for p in st.session_state.pacientes],
-                key="retirar_ids",
-                format_func=lambda i: next(f"{p.id} · {p.nombre}" for p in st.session_state.pacientes if p.id == i),
+    if enviado:
+        try:
+            nuevo = Paciente(
+                id=_siguiente_id(),
+                nombre=nombre.strip() or "Paciente sin nombre",
+                edad=int(edad),
+                hora_llegada=kb.MINUTO_ACTUAL_TURNO - int(espera),
+                sat_o2=float(sat),
+                pafi=int(pafi),
+                escala_sofa=int(sofa),
+                glasgow=int(glasgow),
+                requiere_ventilador=vent,
+                comorbilidades_graves=[c.strip() for c in comorb.split(",") if c.strip()],
+                enfermedad_terminal_irreversible=terminal,
+                vulnerabilidad_social=vulnerable,
+                descripcion="Paciente registrado manualmente en el censo actual.",
+                frecuencia_respiratoria=int(fr),
+                presion_sistolica=int(pas),
+                frecuencia_cardiaca=int(fc),
+                temperatura=float(temp),
+                oxigeno_suplementario=bool(o2_sup),
+                escala_acvpu=str(acvpu),
             )
-            st.button("Retirar seleccionados", on_click=cb_retirar, use_container_width=True)
-            st.button("Vaciar sala de urgencias", on_click=cb_vaciar, use_container_width=True)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        st.session_state.pacientes = st.session_state.pacientes + [nuevo]
+        st.session_state.aviso = f"{nuevo.nombre} ({nuevo.id}) ingresó a urgencias."
+        st.rerun()
 
 
 # =============================================================================
-# Encabezado Hospitalario Principal
+# Barra lateral: configuración del caso (4 pasos numerados)
 # =============================================================================
-st.markdown(
-    """
-    <div class="hospital-navbar">
-      <div>
-        <div class="brand-dept">🏥 Hospital Universitario · Unidad de Cuidados Intensivos</div>
-        <h1>Sistema de Soporte a Decisiones Clínico-Bioéticas (CDSS-XAI)</h1>
-        <p>Comité Autónomo Multiagente Simbólico para Triage UCI y Asignación Justa de Recursos Críticos · Universidad Católica Luis Amigó</p>
-      </div>
-      <div style="text-align:right;">
-        <span class="status-tag">🟢 SISTEMA OPERATIVO | AUDITORÍA XAI EN VIVO</span>
-        <div style="font-size:0.75rem; color:#64748b; margin-top:4px;">Supervisión Human-in-the-Loop · Ley 23 de 1981</div>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+with st.sidebar:
+    st.markdown("### :material/tune: Configuración del caso")
+    st.caption("Los resultados se actualizan al instante con cada cambio.")
+
+    st.markdown("**1 · Escenario clínico**")
+    escenario_sel = st.selectbox(
+        "Escenario clínico", list(kb.ESCENARIOS), format_func=lambda k: kb.ESCENARIOS[k]["titulo"],
+        key="escenario_sel", label_visibility="collapsed",
+    )
+    st.button("Cargar escenario", type="primary", icon=":material/play_circle:", width="stretch",
+              on_click=cb_cargar_escenario, args=(escenario_sel,),
+              help="Reemplaza los pacientes actuales por los del escenario seleccionado.")
+
+    st.divider()
+    st.markdown("**2 · Recursos disponibles**")
+    st.slider("Camas UCI libres", 0, 5, key="camas",
+              help="Camas de cuidados intensivos libres en este turno.")
+    st.slider("Ventiladores libres", 0, 5, key="ventiladores",
+              help="Ventiladores mecánicos invasivos disponibles de inmediato.")
+    with st.expander("Capacidad instalada"):
+        st.slider("Camas UCI totales de la institución", 5, 40, key="camas_totales")
+
+    st.divider()
+    st.markdown("**3 · Marco ético para desempatar**")
+    modo_sel = st.radio(
+        "Marco ético", [m.value for m in ModoEtico], key="modo",
+        format_func=lambda v: kb.MARCOS_ETICOS[v]["nombre"], label_visibility="collapsed",
+    )
+    st.caption(kb.MARCOS_ETICOS[modo_sel]["principio"])
+
+    st.divider()
+    st.markdown("**4 · Opciones avanzadas**")
+    simulacion_activa = st.toggle(
+        "Simulación temporal (0 h → 24 h)", key="modo_simulacion_temporal",
+        help="Simula la evolución fisiológica a 6, 12 y 24 horas, con liberación de camas UCI y "
+             "reasignación auditada al paciente en espera.",
+    )
+    if simulacion_activa:
+        st.select_slider(
+            "Corte temporal", options=[0, 6, 12, 24], key="hora_simulacion",
+            format_func=lambda h: f"{h} h" + (" · ingreso" if h == 0 else ""),
+        )
+    with st.expander("Parámetros del consenso"):
+        st.slider(
+            "Umbral de empate técnico SOFA (± puntos)", 0, 3, key="umbral",
+            help="Diferencias de SOFA menores o iguales a este valor se consideran clínicamente "
+                 "indistinguibles (variabilidad interobservador). Solo aplica al Consenso Constitucional.",
+        )
+        st.caption(f"Semilla pública del sorteo auditable: `{kb.SEMILLA_SORTEO_AUDITABLE}`")
+
+    st.divider()
+    st.caption(":material/info: Prototipo académico de apoyo a la decisión. La decisión final corresponde "
+               "al médico tratante y al Comité de Ética (Ley 23 de 1981).")
+
+
+# =============================================================================
+# Encabezado
+# =============================================================================
+col_tit, col_estado = st.columns([4, 1.5], vertical_alignment="center")
+with col_tit:
+    st.markdown('<div class="eyebrow">Unidad de Cuidados Intensivos · Comité clínico-bioético</div>',
+                unsafe_allow_html=True)
+    st.title("Triage ético de recursos UCI", anchor=False)
+    st.caption("Sistema experto multiagente y explicable (XAI) · Universidad Católica Luis Amigó · "
+               "Análisis de Inteligencia Artificial")
+with col_estado:
+    st.markdown(":green-badge[:material/check_circle: Motor local activo]  \n"
+                ":gray-badge[:material/person: Decisión final: equipo médico]")
 
 if st.session_state.aviso:
-    st.toast(st.session_state.aviso)
+    st.toast(st.session_state.aviso, icon=":material/check_circle:")
     st.session_state.aviso = ""
 
+with st.expander(":material/help: ¿Cómo usar esta herramienta?"):
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        st.markdown("**1 · Defina el caso**")
+        st.caption("Cargue un escenario en el panel izquierdo o agregue pacientes con el botón "
+                   "*Agregar paciente*.")
+    with g2:
+        st.markdown("**2 · Ajuste recursos y ética**")
+        st.caption("Cambie camas, ventiladores y el marco ético. El comité vuelve a deliberar al instante.")
+    with g3:
+        st.markdown("**3 · Lea el resultado**")
+        st.caption("*Resumen* muestra quién recibe la cama; *Explicación* muestra paso a paso el porqué.")
+    st.markdown("**Prioridades clínicas:** " + " ".join(badge_prioridad(i) for i in (1, 2, 3, 4)))
+
 pacientes: List[Paciente] = st.session_state.pacientes
+
+# Estado vacío amigable
 if not pacientes:
-    st.info("ℹ️ La sala de urgencias está vacía. Seleccione un escenario clínico en el panel lateral o ingrese pacientes manualmente.")
+    with st.container(border=True):
+        st.subheader("La sala de urgencias está vacía", anchor=False)
+        st.caption("Cargue un caso de demostración o agregue un paciente para que el comité delibere.")
+        e1, e2, _ = st.columns([1, 1, 2])
+        e1.button("Cargar caso de demostración", type="primary", icon=":material/play_circle:", width="stretch",
+                  on_click=cb_cargar_escenario, args=("dilema",))
+        if e2.button("Agregar paciente", icon=":material/person_add:", width="stretch"):
+            dialogo_agregar_paciente()
     st.stop()
 
+
 # =============================================================================
-# Ejecución del Comité Multiagente y Cálculo de Consenso
+# Deliberación del comité
 # =============================================================================
 estado = RecursoHospitalario(
     camas_uci_totales=max(st.session_state.camas_totales, st.session_state.camas),
@@ -766,19 +544,23 @@ estado = RecursoHospitalario(
     ventiladores_disponibles=st.session_state.ventiladores,
     modo_etico_activo=st.session_state.modo,
 )
-
 coordinador = ConsensusCoordinator(umbral_empate_sofa=st.session_state.umbral)
-reportes_robustez = coordinador.ejecutar_analisis_monte_carlo(pacientes, estado, n_iteraciones=1000, semilla=42)
+
+with st.spinner("El comité está deliberando…"):
+    reportes_robustez = analisis_monte_carlo(
+        pacientes, _firma_pacientes(pacientes), estado.camas_uci_disponibles, estado.ventiladores_disponibles,
+        estado.camas_uci_totales, estado.modo_etico_activo, st.session_state.umbral,
+    )
 
 sim_activa = st.session_state.get("modo_simulacion_temporal", False)
 rondas_sim = None
-eventos_ronda_actual = []
+eventos_ronda_actual: List[str] = []
+hora_actual = 0
 
 if sim_activa:
-    evos_dilema = kb.escenario_evolucion_temporal_dilema()
-    rondas_sim = coordinador.simular_linea_tiempo(pacientes, estado, evos_dilema)
-    hora_sel = st.session_state.get("hora_simulacion", 0)
-    ronda_actual = next((r for r in rondas_sim if r.hora == hora_sel), rondas_sim[0])
+    rondas_sim = coordinador.simular_linea_tiempo(pacientes, estado, kb.escenario_evolucion_temporal_dilema())
+    hora_actual = st.session_state.get("hora_simulacion", 0)
+    ronda_actual = next((r for r in rondas_sim if r.hora == hora_actual), rondas_sim[0])
     resultado = ronda_actual.resultado_comite
     pacientes = list(resultado.pacientes)
     estado = ronda_actual.recursos
@@ -794,909 +576,574 @@ d_clin = resultado.dictamenes["ClinicalTriageAgent"]
 d_bio = resultado.dictamenes["BioethicsAuditAgent"]
 marco = kb.MARCOS_ETICOS[resultado.modo]
 
-# =============================================================================
-# Banner de Situación Asistencial y Tarjetas KPI
-# =============================================================================
 n_p1 = sum(1 for e in resultado.evaluaciones.values() if e.prioridad == 1)
 deficit = d_rec.datos.get("deficit_camas", 0)
 critico = resultado.estado_hospital == "ESCASEZ_CRITICA"
+destinos = {pid: destino_ui(d) for pid, d in resultado.decisiones.items()}
 
+
+# =============================================================================
+# Situación del hospital (una frase) + indicadores
+# =============================================================================
 if critico:
     st.markdown(
-        f"""
-        <div class="status-alert critical">
-          <span style="font-size:1.5rem; line-height:1;">🚨</span>
-          <div>
-            <div class="status-alert-title">ESCASEZ CRÍTICA DECLARADA (Triaje de Catástrofe / REG-REC-02)</div>
-            <div class="status-alert-desc">
-              La demanda de pacientes en Prioridad 1 ({n_p1} pacientes) supera la oferta inmediata de camas UCI ({estado.camas_uci_disponibles} disponibles). 
-              El comité activa el protocolo de desempate bajo el <b>{marco['nombre']}</b>, garantizando activación del Centro Regulador de Urgencias (CRUE) 
-              y protección de no abandono (Ley 1751 de 2015).
-            </div>
-          </div>
-        </div>
-        """,
+        f'<div class="callout warn"><b>Escasez crítica.</b> {n_p1} paciente(s) crítico(s) compiten por '
+        f'{estado.camas_uci_disponibles} cama(s) UCI y {estado.ventiladores_disponibles} ventilador(es). '
+        f'El comité desempata con el marco <b>{esc(marco["nombre"])}</b> y garantiza remisión CRUE a quien '
+        f'quede en espera (Ley 1751 de 2015).</div>',
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
-        f"""
-        <div class="status-alert normal">
-          <span style="font-size:1.5rem; line-height:1;">✅</span>
-          <div>
-            <div class="status-alert-title">CAPACIDAD ASISTENCIAL NORMAL (Operación Regular / REG-REC-01)</div>
-            <div class="status-alert-desc">
-              La institución dispone de {estado.camas_uci_disponibles} cama(s) libres y {estado.ventiladores_disponibles} ventilador(es). 
-              Toda la demanda crítica en Prioridad 1 ({n_p1} paciente(s)) puede ser absorbida directamente sin conflicto ético distributivo.
-            </div>
-          </div>
-        </div>
-        """,
+        f'<div class="callout ok"><b>Capacidad suficiente.</b> Hay recursos para todos los pacientes críticos '
+        f'({n_p1}). No se requiere desempate ético.</div>',
         unsafe_allow_html=True,
     )
 
-# KPIs Médicos Principales
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Pacientes en Urgencias", len(pacientes), delta=f"Turno min: {kb.MINUTO_ACTUAL_TURNO}", delta_color="off")
-k2.metric("Prioridad 1 (Críticos)", n_p1, delta=f"{d_rec.datos.get('demanda_p1_ventilador', 0)} requieren ventilador", delta_color="off")
-k3.metric("Camas UCI Libres", f"{estado.camas_uci_disponibles} / {estado.camas_uci_totales}",
-          delta=f"-{deficit} cama(s) de déficit" if deficit else "Oferta suficiente",
-          delta_color="inverse" if deficit else "normal")
-k4.metric("Validación Bioética", resultado.validacion_global, delta=marco["nombre"].split()[0], delta_color="off")
+k1.metric("Pacientes en urgencias", len(pacientes), border=True)
+k2.metric("Pacientes críticos (P1)", n_p1, border=True,
+          help=f"{d_rec.datos.get('demanda_p1_ventilador', 0)} de ellos requieren ventilador.")
+k3.metric("Camas UCI libres", estado.camas_uci_disponibles, border=True,
+          delta=(f"-{deficit} de déficit" if deficit else "Suficientes"),
+          help=f"Capacidad instalada: {estado.camas_uci_totales} camas.")
+k4.metric("Ventiladores libres", estado.ventiladores_disponibles, border=True)
 
 
 # =============================================================================
-# Resumen Ejecutivo de la Deliberación del Comité (Inmediatamente Visible)
+# Pestañas
 # =============================================================================
-with st.container():
-    asignados_nombres = [por_id[pid].nombre for pid in resultado.asignados_uci]
-    espera_crue_nombres = [por_id[pid].nombre for pid in resultado.decisiones if resultado.decisiones[pid].prioridad == 1 and not resultado.decisiones[pid].asignado_uci]
-    paliativos_nombres = [por_id[pid].nombre for pid in resultado.decisiones if resultado.decisiones[pid].prioridad == 4]
-    
-    st.markdown(
-        f"""
-        <div class="exec-card">
-          <div class="exec-header">
-            <div>
-              <span style="font-size:0.75rem; font-weight:700; color:#0284c7; text-transform:uppercase; letter-spacing:0.05em;">Resolución Oficial de la Sesión</span>
-              <div class="exec-title">📋 Dictamen Consolidado del Comité Clínico-Bioético</div>
-            </div>
-            <div>
-              {badge_validacion(resultado.validacion_global)}
-            </div>
-          </div>
-          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:16px;">
-            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px;">
-              <div style="font-size:0.78rem; font-weight:700; color:#065f46; text-transform:uppercase; margin-bottom:4px;">🛏️ Asignación Inmediata de Cama UCI</div>
-              <div style="font-size:1.02rem; font-weight:800; color:#0f172a;">{', '.join(asignados_nombres) or 'Ningún paciente asignado'}</div>
-              <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">Recursos físicos de UCI y soporte ventilatorio asegurados en la institución.</div>
-            </div>
-            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px;">
-              <div style="font-size:0.78rem; font-weight:700; color:#92400e; text-transform:uppercase; margin-bottom:4px;">🚑 Red Externa (Protocolo CRUE / Ley 1751)</div>
-              <div style="font-size:1.02rem; font-weight:800; color:#0f172a;">{', '.join(espera_crue_nombres) or 'Sin remisiones pendientes'}</div>
-              <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">Soporte vital transitorio en sala de expansión y solicitud urgente de traslado.</div>
-            </div>
-            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px;">
-              <div style="font-size:0.78rem; font-weight:700; color:#6b21a8; text-transform:uppercase; margin-bottom:4px;">🕊️ Adecuación del Esfuerzo (Ley 1733)</div>
-              <div style="font-size:1.02rem; font-weight:800; color:#0f172a;">{', '.join(paliativos_nombres) or 'Sin pacientes en futilidad'}</div>
-              <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">Cuidado paliativo integral sin encarnizamiento terapéutico (cero abandono).</div>
-            </div>
-          </div>
-          <div style="margin-top:12px; padding-top:10px; border-top:1px solid #f1f5f9; display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; color:#64748b;">
-            <div><b>Marco de Resolución:</b> {marco['nombre']} ({marco['escuela']})</div>
-            <div><b>Principio Rector:</b> {marco['principio']}</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# =============================================================================
-# Navegación por Pestañas (Estructura Limpia y Modular)
-# =============================================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📋 Tablero de Pacientes y Asignación",
-    "👥 Deliberación de Especialistas (Multiagente)",
-    "⚖️ Dilemas Éticos Comparados",
-    "🔍 Explicabilidad Fisiológica y XAI",
-    "📜 Marco Normativo y Responsabilidad",
+tab_res, tab_com, tab_mar, tab_xai, tab_nota, tab_leg = st.tabs([
+    ":material/space_dashboard: Resumen",
+    ":material/groups: Comité",
+    ":material/balance: Marcos éticos",
+    ":material/account_tree: Explicación",
+    ":material/description: Nota clínica",
+    ":material/gavel: Marco legal",
 ])
 
 
-# =============================================================================
-# PESTAÑA 1 · Tablero de Pacientes y Asignación Asistencial
-# =============================================================================
-with tab1:
-    st.markdown("### 🛏️ Censo Clínico de Triage en Urgencias")
-    st.caption("Fichas clínicas de evaluación individualizada, estratificación por gravedad y asignación de destino asistencial.")
+# -----------------------------------------------------------------------------
+# PESTAÑA · Resumen
+# -----------------------------------------------------------------------------
+with tab_res:
+    st.subheader("Recomendación del comité", anchor=False)
+    st.markdown(f"{badge_validacion(resultado.validacion_global)} &nbsp; "
+                f":gray-badge[:material/balance: {marco['nombre']}]")
 
+    grupos = {
+        "uci": [pid for pid in resultado.decisiones if destinos[pid]["cat"] == "uci"],
+        "crue": [pid for pid in resultado.decisiones if destinos[pid]["cat"] == "crue"],
+        "otros": [pid for pid in resultado.decisiones if destinos[pid]["cat"] == "otros"],
+    }
+    r1, r2, r3 = st.columns(3)
+    with r1.container(border=True, height="stretch"):
+        st.markdown(":green[:material/bed:] **Ingresan a UCI**")
+        nombres = "<br>".join(esc(por_id[x].nombre) for x in grupos["uci"]) or "Ningún paciente"
+        st.markdown(f'<div class="names">{nombres}</div>', unsafe_allow_html=True)
+        st.caption("Cama y soporte ventilatorio asegurados en la institución.")
+    with r2.container(border=True, height="stretch"):
+        st.markdown(":orange[:material/ambulance:] **En espera · remisión CRUE**")
+        nombres = "<br>".join(esc(por_id[x].nombre) for x in grupos["crue"]) or "Nadie en espera"
+        st.markdown(f'<div class="names">{nombres}</div>', unsafe_allow_html=True)
+        st.caption("Soporte vital en área de expansión y traslado urgente. Nadie queda sin atención.")
+    with r3.container(border=True, height="stretch"):
+        st.markdown(":violet[:material/spa:] **Otros destinos**")
+        nombres = "<br>".join(f"{esc(por_id[x].nombre)} <span style='font-weight:400;color:#64748B;"
+                              f"font-size:.9rem'>· {esc(destinos[x]['corto'])}</span>"
+                              for x in grupos["otros"]) or "Ninguno"
+        st.markdown(f'<div class="names">{nombres}</div>', unsafe_allow_html=True)
+        st.caption("Cuidados intermedios, hospitalización o cuidado paliativo sin abandono (Ley 1733).")
+
+    # ---- Simulación temporal (solo si está activa)
     if sim_activa and rondas_sim:
-        hora_actual = st.session_state.get("hora_simulacion", 0)
-        st.markdown(
-            f"""
-            <div style="background: linear-gradient(90deg, #0f172a, #1e3a8a); color: white; padding: 14px 20px; border-radius: 12px; margin-bottom: 16px;">
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div>
-                  <span style="font-size:0.75rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:#38bdf8;">
-                    ⏱️ Modo Simulación Dinámica Temporal Multi-Ronda (NEWS2 + Rotación UCI)
-                  </span>
-                  <h3 style="margin:2px 0 0 0; color:white; font-size:1.25rem;">
-                    Corte Clínico a las {hora_actual} Horas {'(Ingreso Inicial Urgencias)' if hora_actual == 0 else ''}
-                  </h3>
-                </div>
-                <div style="text-align:right;">
-                  <span style="background:rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.25); padding:4px 12px; border-radius:999px; font-size:0.8rem; font-weight:700;">
-                    4 Cortes: 0h | 6h | 12h | 24h
-                  </span>
-                </div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.write("")
+        with st.container(border=True):
+            st.markdown(f"**:material/schedule: Simulación temporal · corte de {hora_actual} h**")
+            st.markdown(" → ".join(
+                f":primary-badge[{h} h]" if h == hora_actual else f":gray-badge[{h} h]" for h in (0, 6, 12, 24)
+            ))
+            if eventos_ronda_actual:
+                for ev in eventos_ronda_actual:
+                    icono = ":green[:material/swap_horiz:]" if ("LIBERACIÓN" in ev or "REASIGNACIÓN" in ev) \
+                        else ":gray[:material/info:]"
+                    st.markdown(f"{icono} {ev}")
+            else:
+                st.caption("Sin eventos clínicos en este corte.")
 
-        # Bitácora de eventos clínicos y de rotación
-        if eventos_ronda_actual:
-            with st.container():
-                st.markdown(f"**📜 Bitácora de Eventos Clínicos y Rotación de Camas (t = {hora_actual}h):**")
-                cols_ev = st.columns(len(eventos_ronda_actual) if len(eventos_ronda_actual) <= 2 else 2)
-                for i_ev, ev in enumerate(eventos_ronda_actual):
-                    with cols_ev[i_ev % len(cols_ev)]:
-                        if "LIBERACIÓN" in ev or "REASIGNACIÓN" in ev:
-                            st.success(ev)
-                        else:
-                            st.info(ev)
+            etiquetas_h = ["0 h", "6 h", "12 h", "24 h"]
+            uci_ocupadas = [len([1 for d in r.resultado_comite.decisiones.values() if d.asignado_uci])
+                            for r in rondas_sim]
+            camas_libres_vals = [r.recursos.camas_uci_disponibles for r in rondas_sim]
+            espera_vals = [len([1 for d in r.resultado_comite.decisiones.values()
+                                if d.prioridad == 1 and not d.asignado_uci]) for r in rondas_sim]
+            intermedios_vals = [len([1 for d in r.resultado_comite.decisiones.values()
+                                     if d.destino == "CUIDADOS INTERMEDIOS / MONITOREO CONTINUO"])
+                                for r in rondas_sim]
+            fig_flujo = go.Figure()
+            fig_flujo.add_trace(go.Bar(name="En UCI", x=etiquetas_h, y=uci_ocupadas, marker_color=HEX["verde"],
+                                       text=uci_ocupadas, textposition="auto"))
+            fig_flujo.add_trace(go.Bar(name="En espera CRUE", x=etiquetas_h, y=espera_vals,
+                                       marker_color=HEX["ambar"], text=espera_vals, textposition="auto"))
+            fig_flujo.add_trace(go.Bar(name="Pasaron a intermedios", x=etiquetas_h, y=intermedios_vals,
+                                       marker_color=HEX["azul"], text=intermedios_vals, textposition="auto"))
+            fig_flujo.add_trace(go.Scatter(name="Camas UCI libres", x=etiquetas_h, y=camas_libres_vals,
+                                           mode="lines+markers", line=dict(color=HEX["teal"], width=2, dash="dot"),
+                                           marker=dict(size=8)))
+            fig_flujo.add_vline(x=etiquetas_h[[0, 6, 12, 24].index(hora_actual)], line_width=2, line_dash="dot",
+                                line_color=HEX["gris"])
+            fig_flujo.update_layout(barmode="group", yaxis_title="Pacientes / camas")
+            st.plotly_chart(estilo_figura(fig_flujo, "Rotación de camas UCI en el tiempo", 300),
+                            width="stretch", config=PLOTLY_CONFIG)
 
-        # Gráfico Plotly de flujo temporal
-        horas_label = ["0h (Ingreso)", "6h", "12h", "24h"]
-        uci_ocupadas = [len([pid for pid, d in r.resultado_comite.decisiones.items() if d.asignado_uci]) for r in rondas_sim]
-        camas_libres_vals = [r.recursos.camas_uci_disponibles for r in rondas_sim]
-        lista_espera_vals = [len([pid for pid, d in r.resultado_comite.decisiones.items() if d.prioridad == 1 and not d.asignado_uci]) for r in rondas_sim]
-        intermedios_vals = [len([pid for pid, d in r.resultado_comite.decisiones.items() if d.destino == "CUIDADOS INTERMEDIOS / MONITOREO CONTINUO"]) for r in rondas_sim]
-
-        fig_flujo = go.Figure()
-        fig_flujo.add_trace(go.Bar(
-            name="🛏️ Pacientes en UCI",
-            x=horas_label, y=uci_ocupadas,
-            marker_color="#059669",
-            text=uci_ocupadas, textposition="auto",
-        ))
-        fig_flujo.add_trace(go.Bar(
-            name="🚑 Lista de Espera CRUE (P1 sin cama)",
-            x=horas_label, y=lista_espera_vals,
-            marker_color="#dc2626",
-            text=lista_espera_vals, textposition="auto",
-        ))
-        fig_flujo.add_trace(go.Bar(
-            name="🩺 Cuidados Intermedios (Liberaron UCI)",
-            x=horas_label, y=intermedios_vals,
-            marker_color="#2563eb",
-            text=intermedios_vals, textposition="auto",
-        ))
-        fig_flujo.add_trace(go.Scatter(
-            name="🟢 Camas UCI Disponibles",
-            x=horas_label, y=camas_libres_vals,
-            mode="lines+markers",
-            line=dict(color="#0284c7", width=3, dash="dash"),
-            marker=dict(size=10, symbol="diamond"),
-        ))
-
-        hora_map = {0: "0h (Ingreso)", 6: "6h", 12: "12h", 24: "24h"}
-        fig_flujo.add_vline(
-            x=hora_map[hora_actual],
-            line_width=3, line_dash="dot", line_color="#f59e0b",
-            annotation_text=f"Paso actual: {hora_map[hora_actual]}",
-            annotation_position="top left",
-        )
-
-        fig_flujo.update_layout(
-            title="📊 Dinámica Temporal del Flujo Hospitalario: Rotación de Camas UCI y Reducción de Lista de Espera",
-            barmode="group",
-            xaxis_title="Corte Temporal Clínico",
-            yaxis_title="Pacientes / Recursos",
-            height=340,
-            margin=dict(t=40, b=10, l=40, r=40),
-            legend=dict(orientation="h", y=-0.28, x=0.5, xanchor="center"),
-            template="plotly_white",
-        )
-        st.plotly_chart(fig_flujo, use_container_width=True)
-        st.divider()
-
-    # Renderizado en tarjetas clínicas individuales
-    cols_pacientes = st.columns(len(pacientes) if len(pacientes) <= 3 else 3)
-    for idx, p in enumerate(pacientes):
-        col = cols_pacientes[idx % len(cols_pacientes)]
-        d = resultado.decisiones[p.id]
-        e = resultado.evaluaciones[p.id]
-        
-        # Clasificación SDRA Berlín
-        sdra_info = kb.clasificar_sdra_berlin(p.pafi)
-
-        # Score NEWS2
-        news2_sc, news2_niv, news2_resp = kb.calcular_news2(p)
-        news2_bg = "#ecfdf5" if news2_niv == "BAJO" else ("#fffbeb" if news2_niv == "MEDIO" else "#fef2f2")
-        news2_fg = "#065f46" if news2_niv == "BAJO" else ("#92400e" if news2_niv == "MEDIO" else "#991b1b")
-        news2_border = "#a7f3d0" if news2_niv == "BAJO" else ("#fde68a" if news2_niv == "MEDIO" else "#fecaca")
-        
-        with col:
-            comorb_str = ", ".join(p.comorbilidades_graves) if p.comorbilidades_graves else "Sin antecedentes relevantes"
-            border_dest = "#059669" if d.asignado_uci else ("#d97706" if d.prioridad == 1 else "#cbd5e1")
-            
-            st.markdown(
-                f"""
-                <div class="patient-board-card" style="border-top: 5px solid {border_dest};">
-                  <div class="patient-name-row">
-                    <div>
-                      <div class="patient-title">{html.escape(p.nombre)}</div>
-                      <div class="patient-meta"><b>{p.id}</b> · {p.edad} años · Llegó hace {p.minutos_espera(kb.MINUTO_ACTUAL_TURNO)} min</div>
-                    </div>
-                    <div>
-                      {badge_prioridad(e.prioridad)}
-                    </div>
-                  </div>
-                  
-                  <div style="margin: 10px 0;">
-                    <span class="vital-chip {'critical' if p.escala_sofa >= 12 else ('alert' if p.escala_sofa >= 7 else '')}">
-                      SOFA: <b>{p.escala_sofa}</b> (Rev. {e.reversibilidad})
-                    </span>
-                    <span class="vital-chip {'critical' if p.pafi <= 100 else ('alert' if p.pafi <= 200 else '')}">
-                      PaFi: <b>{p.pafi}</b>
-                    </span>
-                    <span class="vital-chip {'critical' if p.sat_o2 < 85 else ('alert' if p.sat_o2 < 92 else '')}">
-                      SatO₂: <b>{p.sat_o2}%</b>
-                    </span>
-                    <span class="vital-chip">
-                      Glasgow: <b>{p.glasgow}/15</b>
-                    </span>
-                    <span class="vital-chip">
-                      Ventilador: <b>{'Requerido' if p.requiere_ventilador else 'No'}</b>
-                    </span>
-                  </div>
-
-                  <!-- Tarjeta NEWS2 (RCP 2017) -->
-                  <div style="background:{news2_bg}; border:1px solid {news2_border}; border-radius:8px; padding:8px 10px; margin:8px 0; font-size:0.8rem;">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                      <span style="font-weight:800; color:{news2_fg};">🩺 Score NEWS2: {news2_sc} pts</span>
-                      <span style="font-weight:700; color:{news2_fg}; font-size:0.72rem; text-transform:uppercase; background:rgba(255,255,255,0.7); padding:2px 8px; border-radius:999px;">Riesgo {news2_niv}</span>
-                    </div>
-                    <div style="color:#475569; font-size:0.75rem; margin-top:4px;">
-                      FR: <b>{p.frecuencia_respiratoria} rpm</b> · PAS: <b>{p.presion_sistolica} mmHg</b> · FC: <b>{p.frecuencia_cardiaca} lpm</b> · Temp: <b>{p.temperatura:.1f} °C</b> · O₂: <b>{'Sí' if p.oxigeno_suplementario else 'No'}</b> · ACVPU: <b>{p.escala_acvpu}</b>
-                    </div>
-                    <div style="color:{news2_fg}; font-size:0.73rem; margin-top:3px; font-weight:600;">
-                      👉 {news2_resp}
-                    </div>
-                  </div>
-
-                  <div style="font-size:0.8rem; color:#475569; margin-bottom:8px;">
-                    <div><b>Estado Respiratorio:</b> {sdra_info}</div>
-                    <div><b>Comorbilidades:</b> {html.escape(comorb_str)}</div>
-                    {f"<div style='color:#0369a1; font-weight:600;'>⭐ Sujeto de especial protección constitucional</div>" if p.vulnerabilidad_social else ""}
-                    {f"<div style='color:#7c3aed; font-weight:600;'>⚠️ Enfermedad terminal irreversible declarada</div>" if p.enfermedad_terminal_irreversible else ""}
-                  </div>
-
-                  <div style="border-top:1px solid #f1f5f9; padding-top:10px; margin-top:8px;">
-                    <div style="font-size:0.75rem; text-transform:uppercase; font-weight:700; color:#64748b; margin-bottom:4px;">Destino Asistencial Asignado:</div>
-                    <div>{destino_asistencial_badge(d.asignado_uci, d.prioridad, d.posicion_ranking)}</div>
-                    <div style="font-size:0.8rem; color:#475569; margin-top:6px;">
-                      <b>Plan Clínico:</b> {html.escape(d.plan_alternativo or d.justificacion)}
-                    </div>
-                    <div style="margin-top:6px;">
-                      {badge_validacion(d.validacion_etica)}
-                    </div>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+    # ---- Pacientes
+    st.write("")
+    ph1, ph2 = st.columns([3, 2], vertical_alignment="bottom")
+    with ph1:
+        st.subheader("Pacientes", anchor=False)
+        st.caption("Ordenados según la recomendación: primero UCI, luego espera y otros destinos.")
+    with ph2:
+        b1, b2 = st.columns(2)
+        if b1.button("Agregar paciente", icon=":material/person_add:", width="stretch",
+                     disabled=sim_activa, help="Desactivado durante la simulación temporal." if sim_activa else None):
+            dialogo_agregar_paciente()
+        with b2.popover("Retirar", icon=":material/person_remove:", width="stretch", disabled=sim_activa):
+            st.multiselect(
+                "Pacientes a retirar", [p.id for p in st.session_state.pacientes], key="retirar_ids",
+                format_func=lambda i: next(f"{p.nombre} ({p.id})" for p in st.session_state.pacientes if p.id == i),
             )
+            st.button("Retirar seleccionados", on_click=cb_retirar, type="primary", width="stretch")
+            st.button("Vaciar sala de urgencias", on_click=cb_vaciar, icon=":material/delete_sweep:",
+                      width="stretch")
 
-    # Vista tabular complementaria expandible para auditoría
-    with st.expander("📊 Ver matriz clínica consolidada (Base de Hechos)", expanded=False):
-        df_hechos = pd.DataFrame([
+    orden_cat = {"uci": 0, "crue": 1, "otros": 2}
+    ordenados = sorted(
+        pacientes,
+        key=lambda p: (orden_cat[destinos[p.id]["cat"]], resultado.decisiones[p.id].prioridad,
+                       resultado.decisiones[p.id].posicion_ranking or 99),
+    )
+    n_cols = 3
+    for inicio in range(0, len(ordenados), n_cols):
+        cols = st.columns(n_cols)
+        for col, p in zip(cols, ordenados[inicio:inicio + n_cols]):
+            d = resultado.decisiones[p.id]
+            e = resultado.evaluaciones[p.id]
+            dui = destinos[p.id]
+            with col.container(border=True):
+                st.markdown(
+                    f'<div class="pname">{esc(p.nombre)}</div>'
+                    f'<div class="pmeta">{esc(p.id)} · {p.edad} años · llegó hace '
+                    f'{p.minutos_espera(kb.MINUTO_ACTUAL_TURNO)} min</div>',
+                    unsafe_allow_html=True,
+                )
+                etiquetas = [badge_prioridad(e.prioridad), badge_news2(p)]
+                if p.vulnerabilidad_social:
+                    etiquetas.append(":blue-badge[Especial protección]")
+                if p.enfermedad_terminal_irreversible:
+                    etiquetas.append(":gray-badge[Enfermedad terminal]")
+                st.markdown(" ".join(etiquetas))
+                st.markdown(html_vitales(p), unsafe_allow_html=True)
+                st.markdown(f"**:{dui['color']}[{dui['icono']} {dui['label']}]**")
+
+                with st.expander("Ver detalle clínico"):
+                    news2_sc, _, news2_resp = kb.calcular_news2(p)
+                    st.markdown(f"**Estado respiratorio:** {kb.clasificar_sdra_berlin(p.pafi)}")
+                    st.markdown(f"**Reversibilidad:** {e.reversibilidad} · sobrevida estimada "
+                                f"{e.prob_sobrevida:.0%}")
+                    st.markdown(f"**Comorbilidades:** {', '.join(p.comorbilidades_graves) or 'Ninguna relevante'}")
+                    st.markdown(f"**Ventilador:** {'requerido' if p.requiere_ventilador else 'no requerido'}")
+                    st.markdown(
+                        f"**Signos NEWS2 ({news2_sc} pts):** FR {p.frecuencia_respiratoria} rpm · "
+                        f"PAS {p.presion_sistolica} mmHg · FC {p.frecuencia_cardiaca} lpm · "
+                        f"T {p.temperatura:.1f} °C · O₂ {'sí' if p.oxigeno_suplementario else 'no'} · "
+                        f"ACVPU {p.escala_acvpu}"
+                    )
+                    st.caption(news2_resp)
+                    st.markdown(f"**Plan clínico:** {d.plan_alternativo or d.justificacion}")
+                    st.markdown(f"**Auditoría ética:** {badge_validacion(d.validacion_etica)}")
+                    rep = reportes_robustez.get(p.id) if reportes_robustez else None
+                    if rep:
+                        st.markdown(f"**Estabilidad de la recomendación:** {rep.porcentaje_estabilidad_decision:.1f} %")
+
+    with st.expander(":material/table_view: Ver todos los datos en tabla"):
+        st.dataframe(pd.DataFrame([
             {
-                "ID": p.id,
-                "Nombre": p.nombre,
-                "Edad": p.edad,
+                "ID": p.id, "Nombre": p.nombre, "Edad": p.edad,
                 "Espera (min)": p.minutos_espera(kb.MINUTO_ACTUAL_TURNO),
-                "SatO₂ (%)": p.sat_o2,
-                "PaFi": p.pafi,
-                "SOFA": p.escala_sofa,
-                "Glasgow": p.glasgow,
+                "SatO₂ (%)": p.sat_o2, "PaFi": p.pafi, "SOFA": p.escala_sofa, "Glasgow": p.glasgow,
+                "NEWS2": kb.calcular_news2(p)[0],
                 "Ventilador": "Sí" if p.requiere_ventilador else "No",
                 "Comorbilidades": ", ".join(p.comorbilidades_graves) or "Ninguna",
                 "Terminal": "Sí" if p.enfermedad_terminal_irreversible else "No",
-                "Especial Protección": "Sí" if p.vulnerabilidad_social else "No",
-                "Prioridad Asignada": ETIQUETAS_PRIORIDAD[resultado.evaluaciones[p.id].prioridad],
+                "Especial protección": "Sí" if p.vulnerabilidad_social else "No",
+                "Prioridad": ETIQUETAS_PRIORIDAD[resultado.evaluaciones[p.id].prioridad],
                 "Destino": resultado.decisiones[p.id].destino,
             }
             for p in pacientes
-        ])
-        st.dataframe(df_hechos, hide_index=True, use_container_width=True)
+        ]), hide_index=True, width="stretch")
 
 
-# =============================================================================
-# PESTAÑA 2 · Deliberación de Especialistas (Multiagente)
-# =============================================================================
-with tab2:
-    st.markdown("### 👥 Deliberación del Comité Médico-Bioético")
-    st.caption("Cada agente del sistema opera con un dominio funcional autónomo e inspectable, aportando su dictamen a la deliberación.")
+# -----------------------------------------------------------------------------
+# PESTAÑA · Comité (deliberación multiagente)
+# -----------------------------------------------------------------------------
+with tab_com:
+    st.subheader("Cómo deliberó el comité", anchor=False)
+    st.caption("Tres agentes especialistas analizan el caso por separado y el coordinador integra sus dictámenes.")
+    st.markdown(":blue-badge[1 · Evaluación clínica] → :green-badge[2 · Gestión de camas] → "
+                ":violet-badge[3 · Auditoría bioética] → :gray-badge[4 · Consenso]")
 
-    col_a1, col_a2, col_a3 = st.columns(3)
-    agentes_cols = [
-        (col_a1, "ClinicalTriageAgent"),
-        (col_a2, "ResourceManagerAgent"),
-        (col_a3, "BioethicsAuditAgent"),
-    ]
-
-    for col, nombre_agente in agentes_cols:
-        d_agente = resultado.dictamenes[nombre_agente]
-        info_ui = AGENTE_INFO[nombre_agente]
-        color_agente = info_ui["color"]
-        
-        with col:
-            # Cuerpo de la tarjeta según el agente
-            resumen_html = ""
+    cols_ag = st.columns(3)
+    for col, nombre_agente in zip(cols_ag, ["ClinicalTriageAgent", "ResourceManagerAgent", "BioethicsAuditAgent"]):
+        d_ag = resultado.dictamenes[nombre_agente]
+        ui = AGENTE_UI[nombre_agente]
+        with col.container(border=True, height="stretch"):
+            st.markdown(f"#### :{ui['color']}[{ui['icono']}] {ui['titulo']}")
+            st.caption(ui["sub"])
+            st.markdown(f'<div class="verdict">{esc(d_ag.veredicto)}</div>', unsafe_allow_html=True)
             if nombre_agente == "ClinicalTriageAgent":
                 for pid, e in resultado.evaluaciones.items():
-                    resumen_html += (
-                        f'<div style="margin-bottom:6px; font-size:0.83rem;">'
-                        f'<b>{html.escape(por_id[pid].nombre)}:</b> {badge_prioridad(e.prioridad)} '
-                        f'· Rev. {e.reversibilidad} · Sobrevida {e.prob_sobrevida:.0%}'
-                        f'</div>'
-                    )
+                    st.markdown(f"**{por_id[pid].nombre}** {badge_prioridad(e.prioridad)}  \n"
+                                f":gray[Reversibilidad {e.reversibilidad.lower()} · sobrevida "
+                                f"{e.prob_sobrevida:.0%}]")
             elif nombre_agente == "ResourceManagerAgent":
-                for pid in resultado.orden_prioridad:
-                    ok = pid in d_agente.datos.get("asignados", [])
-                    pill_badge = (
-                        '<span class="pill pill-assigned">ASIGNADO</span>'
-                        if ok else '<span class="pill pill-waiting">EN COLA CRUE</span>'
-                    )
-                    resumen_html += (
-                        f'<div style="margin-bottom:6px; font-size:0.83rem;">'
-                        f'{pill_badge} <b>{html.escape(por_id[pid].nombre)}</b>'
-                        f'</div>'
-                    )
-                if not resultado.orden_prioridad:
-                    resumen_html = '<div style="font-size:0.83rem; color:#64748b;">No hay pacientes compitiendo por UCI.</div>'
-            else:  # BioethicsAuditAgent
-                for pid, v in d_agente.datos.get("validacion_por_paciente", {}).items():
-                    resumen_html += (
-                        f'<div style="margin-bottom:6px; font-size:0.83rem;">'
-                        f'{badge_validacion(v)} <b>{html.escape(por_id[pid].nombre)}</b>'
-                        f'</div>'
-                    )
+                if resultado.orden_prioridad:
+                    for pid in resultado.orden_prioridad:
+                        ok = pid in d_ag.datos.get("asignados", [])
+                        st.markdown(f"**{por_id[pid].nombre}** "
+                                    + (":green-badge[Cama asignada]" if ok else ":orange-badge[En espera · CRUE]"))
+                else:
+                    st.caption("No hay pacientes compitiendo por UCI.")
+            else:
+                for pid, v in d_ag.datos.get("validacion_por_paciente", {}).items():
+                    st.markdown(f"**{por_id[pid].nombre}** {badge_validacion(v)}")
+            with st.expander(f"Reglas aplicadas ({len(d_ag.trazas)})"):
+                for t in d_ag.trazas:
+                    render_traza(t, mostrar_agente=False)
 
-            st.markdown(
-                f"""
-                <div class="agent-panel" style="border-top: 5px solid {color_agente};">
-                  <div class="agent-panel-header">
-                    <div class="agent-avatar">{info_ui['icono']}</div>
-                    <div>
-                      <div class="agent-role-title">{info_ui['titulo']}</div>
-                      <div class="agent-role-sub">{info_ui['sub']}</div>
-                    </div>
-                  </div>
-                  <div class="verdict-box" style="background:{color_agente}15; color:{color_agente}; border:1px solid {color_agente}30;">
-                    {html.escape(d_agente.veredicto)}
-                  </div>
-                  <div style="margin-top:10px;">
-                    {resumen_html}
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            
-            with st.expander(f"🔍 Ver reglas disparadas ({nombre_agente})", expanded=False):
-                for t in d_agente.trazas:
-                    render_traza_moderna(t, mostrar_agente=False)
+    # ---- Acta de consenso
+    st.write("")
+    st.subheader("Acta de consenso", anchor=False)
+    a1, a2 = st.columns([3, 2])
+    with a1.container(border=True, height="stretch"):
+        st.markdown(badge_validacion(resultado.validacion_global))
+        st.markdown(resultado.acta_consenso)
+    with a2.container(border=True, height="stretch"):
+        st.markdown(f"**{marco['nombre']}**")
+        st.caption(marco["escuela"])
+        st.markdown(f"**Criterio:** {marco['criterio']}")
+        st.markdown(f"**Tensión ética:** {marco['critica']}")
 
-    st.markdown("---")
-    
-    # Análisis de Sensibilidad Estocástica (Monte Carlo)
-    st.markdown("#### 🎲 Análisis de Estabilidad y Casos Borde (Simulación de Monte Carlo)")
+    # ---- Estabilidad (Monte Carlo)
+    st.write("")
+    st.subheader("¿Qué tan estable es la recomendación?", anchor=False)
     st.caption(
-        "Evaluación de sensibilidad estocástica (1000 iteraciones con semilla reproducible). "
-        "Mide la estabilidad de las recomendaciones ante error instrumental en oximetría (sigma = 1.5%), "
-        "variabilidad de gasometría arterial PaFi (sigma = 10 mmHg) y discrepancia interobservador SOFA (±1 punto con p=0.15)."
+        "Se simularon 1.000 variaciones de los datos con errores de medición realistas (SatO₂ ±1,5 %, "
+        "PaFi ±10 mmHg, SOFA ±1 punto). Si el destino casi no cambia (≥ 90 %), la recomendación es robusta; "
+        "por debajo, es un caso borde y conviene repetir mediciones."
     )
-
     if reportes_robustez:
-        cols_mc = st.columns(len(pacientes) if len(pacientes) <= 3 else 3)
-        for idx_mc, p_mc in enumerate(pacientes):
-            col_mc = cols_mc[idx_mc % len(cols_mc)]
-            rep_mc = reportes_robustez.get(p_mc.id)
-            if not rep_mc:
-                continue
-            with col_mc:
-                pct_mc = rep_mc.porcentaje_estabilidad_decision
-                color_mc = "#16a34a" if pct_mc >= 90.0 else ("#f59e0b" if pct_mc >= 85.0 else "#dc2626")
-                badge_diag_mc = (
-                    f'<span style="display:inline-block; padding:3px 10px; border-radius:999px; '
-                    f'background:{"#ecfdf5" if pct_mc >= 90.0 else "#fef2f2"}; '
-                    f'color:{"#065f46" if pct_mc >= 90.0 else "#991b1b"}; '
-                    f'border:1px solid {"#a7f3d0" if pct_mc >= 90.0 else "#fecaca"}; '
-                    f'font-size:0.75rem; font-weight:700;">'
-                    f'{"ROBUSTA / SEGURA" if pct_mc >= 90.0 else "ZONA FRONTERA / CASO BORDE"}</span>'
-                )
-
-                fig_gauge_mc = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=pct_mc,
-                    number={"suffix": "%", "font": {"size": 26, "color": color_mc}},
-                    title={"text": f"<b>{html.escape(p_mc.nombre)}</b><br><span style='font-size:10px;color:#64748b;'>{p_mc.id}</span>", "font": {"size": 13}},
-                    gauge={
-                        "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#94a3b8", "tickfont": {"size": 9}},
-                        "bar": {"color": color_mc, "thickness": 0.28},
-                        "bgcolor": "#f8fafc",
-                        "borderwidth": 1,
-                        "bordercolor": "#e2e8f0",
-                        "steps": [
-                            {"range": [0, 85], "color": "#fee2e2"},
-                            {"range": [85, 90], "color": "#fef3c7"},
-                            {"range": [90, 100], "color": "#dcfce7"},
-                        ],
-                        "threshold": {
-                            "line": {"color": "#dc2626", "width": 2},
-                            "thickness": 0.75,
-                            "value": 85,
-                        },
-                    },
-                ))
-                fig_gauge_mc.update_layout(height=175, margin=dict(t=35, b=5, l=15, r=15))
-
-                st.markdown(
-                    f"""
-                    <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:12px; margin-bottom:12px;">
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                        <span style="font-size:0.8rem; font-weight:700; color:#64748b;">Estabilidad Decisión</span>
-                        {badge_diag_mc}
-                      </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                st.plotly_chart(fig_gauge_mc, use_container_width=True, key=f"gauge_mc_{p_mc.id}")
-                st.progress(pct_mc / 100.0)
-                st.markdown(
-                    f"""
-                      <div style="font-size:0.77rem; color:#334155; margin-top:8px; line-height:1.4;">
-                        <b>Directriz Clínica XAI:</b> {html.escape(rep_mc.advertencia_clinica)}
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    st.markdown("---")
-    
-    # Acta oficial del Coordinador de Consenso
-    st.markdown("#### 🧭 Acta Formal de Consenso del Comité")
-    c_acta1, c_acta2 = st.columns([3, 2])
-    with c_acta1:
         with st.container(border=True):
-            st.markdown(badge_validacion(resultado.validacion_global), unsafe_allow_html=True)
-            st.markdown(resultado.acta_consenso)
-    with c_acta2:
-        with st.container(border=True):
-            st.markdown(f"**Marco Filosófico:** {marco['nombre']}")
-            st.markdown(f"**Escuela:** *{marco['escuela']}*")
-            st.markdown(f"**Criterio Operativo:** {marco['criterio']}")
-            st.markdown(f"**Tensión Ética Identificada:** {marco['critica']}")
+            for p_mc in pacientes:
+                rep_mc = reportes_robustez.get(p_mc.id)
+                if not rep_mc:
+                    continue
+                pct = rep_mc.porcentaje_estabilidad_decision
+                m1, m2, m3 = st.columns([2, 4, 2], vertical_alignment="center")
+                m1.markdown(f"**{p_mc.nombre}**")
+                m2.progress(min(max(pct / 100.0, 0.0), 1.0), text=f"{pct:.1f} %")
+                m3.markdown(":green-badge[Robusta]" if pct >= 90.0 else
+                            (":orange-badge[Caso borde]" if pct >= 85.0 else ":red-badge[Caso borde]"))
+        with st.expander("Ver recomendaciones por paciente"):
+            for p_mc in pacientes:
+                rep_mc = reportes_robustez.get(p_mc.id)
+                if rep_mc:
+                    st.markdown(f"**{p_mc.nombre}:** {rep_mc.advertencia_clinica}")
 
-    # Transcripción estructurada de la sesión clínica
-    with st.expander("💬 Transcripción de la Sesión Deliberativa del Comité", expanded=False):
-        with st.chat_message("ClinicalTriageAgent", avatar="🩺"):
-            st.markdown(f"**Especialista en Medicina Crítica (ClinicalTriageAgent):**\n\n{d_clin.veredicto}")
+    # ---- Transcripción
+    with st.expander(":material/forum: Transcripción de la sesión del comité"):
+        with st.chat_message("ClinicalTriageAgent", avatar=":material/stethoscope:"):
+            st.markdown(f"**Evaluación clínica:** {d_clin.veredicto}")
             for pid, e in resultado.evaluaciones.items():
-                futil = " — *Futilidad confirmada (adecuación del esfuerzo)*" if e.futilidad_terapeutica else ""
-                st.markdown(f"- **{por_id[pid].nombre}**: {e.etiqueta_prioridad}, {e.clasificacion_sdra}, reversibilidad {e.reversibilidad}{futil}.")
-
-        with st.chat_message("ResourceManagerAgent", avatar="🏥"):
-            st.markdown(f"**Gestor Hospitalario (ResourceManagerAgent):**\n\n{d_rec.veredicto}")
-
-        with st.chat_message("ConsensusCoordinator", avatar="🧭"):
-            st.markdown(f"**Coordinador del Comité (ConsensusCoordinator):**\n\nSe activa el marco de desempate **{marco['nombre']}**.")
+                futil = " — *futilidad terapéutica: cuidado paliativo digno*" if e.futilidad_terapeutica else ""
+                st.markdown(f"- {por_id[pid].nombre}: **{e.etiqueta_prioridad}**, {e.clasificacion_sdra}, "
+                            f"reversibilidad {e.reversibilidad}{futil}.")
+        with st.chat_message("ResourceManagerAgent", avatar=":material/bed:"):
+            st.markdown(f"**Gestión de camas:** {d_rec.veredicto}")
+        with st.chat_message("ConsensusCoordinator", avatar=":material/hub:"):
+            st.markdown(f"**Coordinador:** aplico el marco **{marco['nombre']}**.")
             for t in resultado.trazas_coordinador:
-                if t.etapa == Etapa.REGLA.value and t.paciente_id:
+                if t.etapa == Etapa.REGLA.value and t.paciente_id and t.paciente_id in por_id:
                     st.markdown(f"- {por_id[t.paciente_id].nombre}: {t.conclusion}")
-
-        with st.chat_message("ResourceManagerAgent", avatar="🏥"):
-            asignados_txt = ", ".join([por_id[x].nombre for x in d_rec.datos.get("asignados", [])]) or "ninguno"
-            st.markdown(f"**Gestor Hospitalario (ResourceManagerAgent):** Recursos físicos vinculados a: **{asignados_txt}**.")
-
-        with st.chat_message("BioethicsAuditAgent", avatar="⚖️"):
-            st.markdown(f"**Auditor Bioético-Legal (BioethicsAuditAgent):**\n\n{d_bio.veredicto}")
-            relevantes = [t for t in d_bio.trazas if t.nivel in ("ALERTA", "OBJECION", "CRITICO") or "PROTECCIÓN REFORZADA" in t.conclusion or t.regla_id in ("REG-BIO-06", "REG-BIO-04")]
+        with st.chat_message("ResourceManagerAgent", avatar=":material/bed:"):
+            asign = ", ".join(por_id[x].nombre for x in d_rec.datos.get("asignados", []) if x in por_id) or "nadie"
+            st.markdown(f"**Gestión de camas:** recursos asignados a **{asign}**.")
+        with st.chat_message("BioethicsAuditAgent", avatar=":material/balance:"):
+            st.markdown(f"**Auditoría bioética:** {d_bio.veredicto}")
+            relevantes = [t for t in d_bio.trazas if t.nivel in ("ALERTA", "OBJECION", "CRITICO")
+                          or "PROTECCIÓN REFORZADA" in t.conclusion or t.regla_id in ("REG-BIO-06", "REG-BIO-04")]
             for t in relevantes:
-                paciente_str = f" ({por_id[t.paciente_id].nombre})" if t.paciente_id else ""
-                st.markdown(f"- `{t.regla_id}`{paciente_str}: {t.conclusion}")
+                quien = f" ({por_id[t.paciente_id].nombre})" if t.paciente_id in por_id else ""
+                st.markdown(f"- `{t.regla_id}`{quien}: {t.conclusion}")
+        with st.chat_message("ConsensusCoordinator", avatar=":material/hub:"):
+            st.markdown(f"**Coordinador — consenso final:**\n\n{resultado.acta_consenso}")
 
 
-# =============================================================================
-# PESTAÑA 3 · Dilemas Éticos Comparados
-# =============================================================================
-with tab3:
-    st.markdown("### ⚖️ Contraste de Marcos Filosóficos y Dilemas Éticos")
-    st.caption("Análisis pedagógico de cómo diferentes escuelas de la ética resuelven el mismo dilema clínico de escasez de recursos.")
+# -----------------------------------------------------------------------------
+# PESTAÑA · Marcos éticos
+# -----------------------------------------------------------------------------
+with tab_mar:
+    st.subheader("El mismo caso, tres formas de decidir", anchor=False)
+    st.caption("Compare a quién asignaría la cama cada enfoque ético. El marco activo se elige en el panel lateral.")
 
-    # 3 Tarjetas de los marcos éticos
-    col_m1, col_m2, col_m3 = st.columns(3)
-    marcos_cols = [
-        (col_m1, ModoEtico.UTILITARISTA_CLINICO.value),
-        (col_m2, ModoEtico.DEONTOLOGICO_IGUALITARIO.value),
-        (col_m3, ModoEtico.CONSENSO_CONSTITUCIONAL_COLOMBIA.value),
-    ]
+    filas = []
+    for p in pacientes:
+        fila = {"Paciente": f"{p.nombre} ({p.edad} años · SOFA {p.escala_sofa})"}
+        for modo_k, r_k in comparacion.items():
+            fila[MARCO_CORTO[modo_k]] = destino_ui(r_k.decisiones[p.id])["corto"]
+        filas.append(fila)
+    fila_val = {"Paciente": "Auditoría bioético-legal"}
+    for modo_k, r_k in comparacion.items():
+        fila_val[MARCO_CORTO[modo_k]] = VALIDACION_UI.get(r_k.validacion_global, ("", "", r_k.validacion_global))[2]
+    filas.append(fila_val)
 
-    for col_m, clave_modo in marcos_cols:
+    estilos_celda = {
+        "UCI": "background-color:#E8F5EE;color:#1F6B4A;font-weight:600",
+        "Espera · CRUE": "background-color:#FFF6E5;color:#8A5A00",
+        "Paliativo": "background-color:#F3EFFA;color:#5B4A8B",
+        "Intermedios": "background-color:#EAF2FB;color:#2C5D8F",
+        "Validado": "background-color:#E8F5EE;color:#1F6B4A",
+        "Validado con observaciones": "background-color:#FFF6E5;color:#8A5A00",
+        "Objetado": "background-color:#FFF1E8;color:#9A4A12",
+        "Veto constitucional": "background-color:#FDEEEE;color:#B93A35;font-weight:600",
+    }
+    df_comp = pd.DataFrame(filas)
+    styler = df_comp.style
+    aplicar = getattr(styler, "map", None) or getattr(styler, "applymap")
+    styler = aplicar(lambda v: estilos_celda.get(v, ""), subset=list(MARCO_CORTO.values()))
+    st.dataframe(styler, hide_index=True, width="stretch")
+
+    st.write("")
+    cols_m = st.columns(3)
+    for col_m, clave_modo in zip(cols_m, [m.value for m in ModoEtico]):
         info_m = kb.MARCOS_ETICOS[clave_modo]
         r_modo = comparacion[clave_modo]
-        es_activo = clave_modo == resultado.modo
-        ganadores_modo = ", ".join(por_id[x].nombre for x in r_modo.asignados_uci) or "Nadie asignado"
-        
-        with col_m:
-            border_css = "border: 2px solid #059669;" if es_activo else "border: 1px solid #e2e8f0;"
-            tag_activo = '<span class="pill pill-assigned" style="margin-left:8px;">ACTIVO EN SESIÓN</span>' if es_activo else ""
-            
-            st.markdown(
-                f"""
-                <div class="framework-card {'active' if es_activo else ''}" style="border-top: 6px solid {info_m['color']};">
-                  <div style="font-size:0.75rem; text-transform:uppercase; font-weight:700; color:{info_m['color']};">
-                    {info_m['escuela']}
-                  </div>
-                  <h4 style="margin:4px 0 8px 0; font-size:1.05rem; color:#0f172a;">
-                    {info_m['nombre']}{tag_activo}
-                  </h4>
-                  
-                  <div style="font-size:0.82rem; margin-bottom:8px;">
-                    <b>Principio:</b> {info_m['principio']}
-                  </div>
-                  <div style="font-size:0.82rem; color:#475569; margin-bottom:8px;">
-                    <b>Criterio de Asignación:</b> {info_m['criterio']}
-                  </div>
-                  
-                  <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px; margin:10px 0;">
-                    <div style="font-size:0.75rem; font-weight:700; color:#64748b; text-transform:uppercase;">Resultado en el Escenario Actual:</div>
-                    <div style="font-size:0.95rem; font-weight:800; color:#0f172a; margin:2px 0;">🛏️ UCI: {ganadores_modo}</div>
-                    <div style="margin-top:4px;">{badge_validacion(r_modo.validacion_global)}</div>
-                  </div>
-
-                  <div style="font-size:0.78rem; color:#991b1b; background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:8px;">
-                    <b>Tensión / Crítica Ética:</b> {info_m['critica']}
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    st.markdown("---")
-
-    # Matriz comparativa detallada
-    st.markdown("#### 🔀 Matriz de Asignación Comparativa: ¿Quién recibe UCI en cada marco?")
-    filas_comp = []
-    for p in pacientes:
-        fila = {
-            "Paciente": f"{p.nombre} ({p.edad} años, SOFA {p.escala_sofa})",
-            "Condición Clave": "Sujeto protección reforzada" if p.vulnerabilidad_social else ("Enfermedad terminal" if p.enfermedad_terminal_irreversible else "Joven sin comorbilidad"),
-        }
-        for modo_k, r_k in comparacion.items():
-            fila[kb.MARCOS_ETICOS[modo_k]["nombre"]] = "🛏️ Cama UCI Asignada" if p.id in r_k.asignados_uci else ("🕊️ Cuidado Paliativo" if r_k.evaluaciones[p.id].prioridad == 4 else "🚑 Cola CRUE")
-        filas_comp.append(fila)
-
-    fila_val = {
-        "Paciente": "⚖️ Dictamen de Auditoría Bioética",
-        "Condición Clave": "Constitucionalidad y No Discriminación",
-    }
-    for modo_k, r_k in comparacion.items():
-        fila_val[kb.MARCOS_ETICOS[modo_k]["nombre"]] = r_k.validacion_global
-    filas_comp.append(fila_val)
-
-    st.dataframe(pd.DataFrame(filas_comp), hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### 📝 Nota Médica y Bioética Oficial para Historia Clínica Electrónica (NLG Simbólico)")
-    st.caption(
-        "Motor determinista de Generación de Lenguaje Natural Simbólico estructurado bajo los estándares de la "
-        "Resolución 1995 de 1999 (MinSalud Colombia), Ley 23 de 1981 (Código de Ética Médica) y Ley Estatutaria 1751 de 2015."
-    )
-
-    with st.expander("📋 Desplegar Nota Oficial para Historia Clínica (Resolución 1995 de 1999)", expanded=True):
-        col_nlg_sel, col_nlg_btn = st.columns([3, 1])
-        with col_nlg_sel:
-            paciente_nlg_id = st.selectbox(
-                "Seleccione paciente para expedir la Nota Oficial de Historia Clínica:",
-                [p.id for p in pacientes],
-                format_func=lambda pid: f"{pid} · {por_id[pid].nombre} ({por_id[pid].edad} años) — {resultado.evaluaciones[pid].etiqueta_prioridad}",
-                key="sel_paciente_nlg_tab3",
-            )
-
-        nlg_gen = ClinicalNarrativeGenerator()
-        rep_p_nlg = reportes_robustez.get(paciente_nlg_id) if reportes_robustez else None
-        texto_nota_nlg = nlg_gen.generar_nota_historia_clinica(
-            paciente_nlg_id,
-            resultado,
-            reporte_robustez=rep_p_nlg,
-        )
-
-        with col_nlg_btn:
-            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-            if st.button("📋 Copiar Nota Oficial para Historia Clínica", key="btn_copiar_nota_tab3", use_container_width=True, type="primary"):
-                st.toast("✅ ¡Nota Oficial lista para copiar al portapapeles / Historia Clínica!")
-                st.success("Nota generada y validada conforme a la Res. 1995 de 1999. Use Ctrl+A / Ctrl+C en el área de texto inferior.")
-
-        # Área de texto editable para el profesional médico
-        nota_editada_nlg = st.text_area(
-            f"Nota Oficial para Historia Clínica Electrónica — {por_id[paciente_nlg_id].nombre} ({paciente_nlg_id}) [Editable]:",
-            value=texto_nota_nlg,
-            height=450,
-            key=f"txt_area_nlg_{paciente_nlg_id}",
-            help="Documento médico-legal solemne en 7 secciones. El médico tratante puede complementar o ajustar la nota antes de guardarla.",
-        )
-
-        col_d1_nlg, col_d2_nlg = st.columns(2)
-        with col_d1_nlg:
-            st.download_button(
-                label=f"💾 Descargar Nota Oficial de {por_id[paciente_nlg_id].nombre} (.txt)",
-                data=nota_editada_nlg.encode("utf-8"),
-                file_name=f"nota_oficial_historia_clinica_{paciente_nlg_id}.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
-        with col_d2_nlg:
-            st.download_button(
-                label="📄 Exportar Expediente Completo con Trazas XAI (.md)",
-                data=nota_editada_nlg.encode("utf-8"),
-                file_name=f"expediente_comite_{paciente_nlg_id}.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
+        activo = clave_modo == resultado.modo
+        ganadores = ", ".join(por_id[x].nombre for x in r_modo.asignados_uci if x in por_id) or "Nadie"
+        with col_m.container(border=True, height="stretch"):
+            st.markdown(f"<span style='color:{info_m['color']};font-size:1.1rem'>●</span> "
+                        f"**{info_m['nombre']}**", unsafe_allow_html=True)
+            st.caption(info_m["escuela"])
+            if activo:
+                st.markdown(":primary-badge[:material/check: Marco activo]")
+            st.markdown(f"**Principio:** {info_m['principio']}")
+            st.markdown(f"**Cama UCI para:** {ganadores}")
+            st.markdown(badge_validacion(r_modo.validacion_global))
+            with st.expander("Criterio y crítica"):
+                st.markdown(f"**Criterio:** {info_m['criterio']}")
+                st.markdown(f"**Crítica:** {info_m['critica']}")
 
 
-# =============================================================================
-# PESTAÑA 4 · Explicabilidad Fisiológica y XAI
-# =============================================================================
-with tab4:
-    st.markdown("### 🔍 Explicabilidad Fisiológica y Trazabilidad XAI")
-    st.caption("Trazas de inferencia auditable: dispersión clínica, ranking determinista y cadena paso a paso por paciente.")
+# -----------------------------------------------------------------------------
+# PESTAÑA · Explicación (XAI)
+# -----------------------------------------------------------------------------
+with tab_xai:
+    st.subheader("¿Por qué el comité recomendó esto?", anchor=False)
+    st.caption("Seleccione un paciente para ver, paso a paso, las reglas que llevaron a su recomendación.")
 
-    col_g1, col_g2 = st.columns([3, 2])
-    with col_g1:
-        # Gráfico Plotly: Urgencia vs Reversibilidad
+    ids_xai = [p.id for p in ordenados]
+    pid_sel = st.pills("Paciente", ids_xai, selection_mode="single", default=ids_xai[0],
+                       format_func=lambda i: por_id[i].nombre, key="xai_paciente",
+                       label_visibility="collapsed") or ids_xai[0]
+    if pid_sel not in por_id:
+        pid_sel = ids_xai[0]
+    p_sel = por_id[pid_sel]
+    d_sel = resultado.decisiones[pid_sel]
+    dui_sel = destinos[pid_sel]
+    rep_sel = reportes_robustez.get(pid_sel) if reportes_robustez else None
+
+    with st.container(border=True):
+        x1, x2 = st.columns([3, 1], vertical_alignment="center")
+        with x1:
+            st.markdown(f"**{p_sel.nombre}** · {p_sel.id} · {p_sel.edad} años  \n"
+                        f"**:{dui_sel['color']}[{dui_sel['icono']} {dui_sel['label']}]** &nbsp; "
+                        f"{badge_validacion(d_sel.validacion_etica)}")
+            if p_sel.descripcion:
+                st.caption(p_sel.descripcion)
+        with x2:
+            if rep_sel:
+                st.metric("Estabilidad", f"{rep_sel.porcentaje_estabilidad_decision:.1f} %",
+                          help=rep_sel.advertencia_clinica)
+
+    vista = st.segmented_control(
+        "Vista", ["Paso a paso", "Árbol de inferencia", "Tabla de trazas"], default="Paso a paso",
+        key="xai_vista", label_visibility="collapsed",
+    ) or "Paso a paso"
+    cadena = resultado.cadena_xai(pid_sel)
+
+    if vista == "Paso a paso":
+        n = 0
+        for etapa in (x.value for x in Etapa):
+            trazas = [t for t in cadena if t.etapa == etapa]
+            if not trazas:
+                continue
+            n += 1
+            paso(n, ETAPA_UI.get(etapa, etapa))
+            for t in trazas:
+                render_traza(t)
+    elif vista == "Árbol de inferencia":
+        st.graphviz_chart(arbol_dot(resultado, pid_sel), width="stretch")
+    else:
+        st.dataframe(pd.DataFrame([t.to_dict() for t in cadena]), hide_index=True, width="stretch")
+
+    st.divider()
+    st.subheader("Vista general del triage", anchor=False)
+    g1, g2 = st.columns([3, 2])
+    with g1:
         fig = go.Figure()
-        for prioridad_val in (1, 2, 3, 4):
-            ids = [pid for pid, e in resultado.evaluaciones.items() if e.prioridad == prioridad_val]
+        for prioridad in (1, 2, 3, 4):
+            ids = [pid for pid, e in resultado.evaluaciones.items() if e.prioridad == prioridad]
             if not ids:
                 continue
             fig.add_trace(go.Scatter(
                 x=[resultado.evaluaciones[i].prob_sobrevida * 100 for i in ids],
                 y=[resultado.evaluaciones[i].puntaje_urgencia for i in ids],
-                mode="markers+text",
-                name=ETIQUETAS_PRIORIDAD[prioridad_val],
-                text=[por_id[i].nombre for i in ids],
-                textposition="top center",
-                marker=dict(
-                    size=[28 if resultado.decisiones[i].asignado_uci else 16 for i in ids],
-                    symbol=["star" if resultado.decisiones[i].asignado_uci else "circle" for i in ids],
-                    color=PRIORIDAD_COLOR[prioridad_val],
-                    line=dict(width=1.5, color="#ffffff"),
-                ),
-                customdata=[[por_id[i].edad, por_id[i].escala_sofa, por_id[i].pafi, resultado.decisiones[i].destino] for i in ids],
-                hovertemplate="<b>%{text}</b><br>Sobrevida Estimada: %{x:.0f}%<br>Puntaje Urgencia: %{y:.1f}<br>"
-                              "Edad: %{customdata[0]} años · SOFA: %{customdata[1]} · PaFi: %{customdata[2]}<br>"
-                              "<b>Destino:</b> %{customdata[3]}<extra></extra>",
+                mode="markers+text", name=PRIORIDAD_UI[prioridad]["corto"],
+                text=[por_id[i].nombre for i in ids], textposition="top center",
+                textfont=dict(size=11, color="#475569"),
+                marker=dict(size=[24 if resultado.decisiones[i].asignado_uci else 14 for i in ids],
+                            symbol=["star" if resultado.decisiones[i].asignado_uci else "circle" for i in ids],
+                            color=PRIORIDAD_UI[prioridad]["hex"], line=dict(width=1.5, color="white")),
+                customdata=[[por_id[i].edad, por_id[i].escala_sofa, por_id[i].pafi, destinos[i]["label"]]
+                            for i in ids],
+                hovertemplate="<b>%{text}</b><br>Sobrevida estimada: %{x:.0f} %<br>Urgencia: %{y:.1f}<br>"
+                              "Edad %{customdata[0]} · SOFA %{customdata[1]} · PaFi %{customdata[2]}<br>"
+                              "%{customdata[3]}<extra></extra>",
             ))
-        
-        fig.add_vline(x=50, line_dash="dot", line_color="#cbd5e1")
-        fig.add_hline(y=50, line_dash="dot", line_color="#cbd5e1")
-        fig.add_annotation(x=98, y=98, text="Alta Urgencia + Alta Reversibilidad", showarrow=False, xanchor="right", font=dict(size=10, color="#64748b"))
-        fig.add_annotation(x=2, y=98, text="Alta Urgencia + Baja Reversibilidad", showarrow=False, xanchor="left", font=dict(size=10, color="#64748b"))
-        
-        fig.update_layout(
-            title="Matriz de Triage: Reversibilidad (Sobrevida SOFA) vs. Urgencia Fisiológica",
-            xaxis=dict(title="Reversibilidad Fisiológica Estimada (%)", range=[0, 105], gridcolor="#f1f5f9"),
-            yaxis=dict(title="Puntaje de Urgencia Fisiológica (0-100)", range=[0, 105], gridcolor="#f1f5f9"),
-            height=390,
-            template="plotly_white",
-            legend=dict(orientation="h", y=-0.22, x=0),
-            margin=dict(t=45, b=10, l=10, r=10),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_g2:
+        fig.add_vline(x=50, line_dash="dot", line_color="#D5DDE6")
+        fig.add_hline(y=50, line_dash="dot", line_color="#D5DDE6")
+        fig.add_annotation(x=98, y=100, text="Urgente y reversible", showarrow=False, xanchor="right",
+                           font=dict(size=10, color=HEX["muted"]))
+        fig.add_annotation(x=2, y=100, text="Urgente, baja reversibilidad", showarrow=False, xanchor="left",
+                           font=dict(size=10, color=HEX["muted"]))
+        fig.update_xaxes(title="Sobrevida estimada por SOFA (%)", range=[0, 105])
+        fig.update_yaxes(title="Urgencia fisiológica (0-100)", range=[0, 108])
+        st.plotly_chart(estilo_figura(fig, "Urgencia vs. reversibilidad  (★ = recibe UCI)", 380),
+                        width="stretch", config=PLOTLY_CONFIG)
+    with g2:
         if resultado.orden_prioridad:
-            orden_p = resultado.orden_prioridad
-            colores_bar = ["#059669" if resultado.decisiones[i].asignado_uci else "#d97706" for i in orden_p]
-            fig_bar = go.Figure(go.Bar(
-                x=[resultado.puntajes[i] for i in orden_p],
-                y=[f"#{k} {por_id[i].nombre}" for k, i in enumerate(orden_p, 1)],
-                orientation="h",
-                text=[f"{resultado.puntajes[i]:.1f}" for i in orden_p],
-                textposition="auto",
-                marker_color=colores_bar,
+            orden = resultado.orden_prioridad
+            figb = go.Figure(go.Bar(
+                x=[resultado.puntajes[i] for i in orden],
+                y=[f"#{k} {por_id[i].nombre}" for k, i in enumerate(orden, 1)],
+                orientation="h", text=[f"{resultado.puntajes[i]:.1f}" for i in orden], textposition="auto",
+                marker_color=[HEX["verde"] if resultado.decisiones[i].asignado_uci else HEX["ambar"] for i in orden],
             ))
-            fig_bar.update_layout(
-                title=f"Orden de Prioridad ({resultado.etiqueta_puntaje})",
-                height=390,
-                yaxis=dict(autorange="reversed"),
-                template="plotly_white",
-                margin=dict(t=45, b=10, l=10, r=10),
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            figb.update_yaxes(autorange="reversed")
+            st.plotly_chart(estilo_figura(figb, "Orden del comité", 380), width="stretch", config=PLOTLY_CONFIG)
+            st.caption(f"{resultado.etiqueta_puntaje}. Verde = recibe cama UCI · ámbar = en espera con plan CRUE.")
         else:
-            st.info("No hay pacientes en Prioridad 1 en competencia distributiva.")
+            st.info("No hay pacientes en Prioridad 1 compitiendo por recursos.", icon=":material/info:")
 
-    st.markdown("---")
-
-    # Cadena explicativa individualizada
-    st.markdown("#### 🔎 Cadena Lógica Individualizada por Paciente")
-    paciente_sel_id = st.selectbox(
-        "Seleccione paciente para inspeccionar su trazabilidad:",
-        [p.id for p in pacientes],
-        format_func=lambda i: f"{por_id[i].id} · {por_id[i].nombre} ({por_id[i].edad} años) — {resultado.evaluaciones[i].etiqueta_prioridad}",
-    )
-
-    if paciente_sel_id:
-        p_sel = por_id[paciente_sel_id]
-        d_sel = resultado.decisiones[p_sel.id]
-        e_sel = resultado.evaluaciones[p_sel.id]
-        
-        st.markdown(
-            f"""
-            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:14px; margin-bottom:12px;">
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div>
-                  <h4 style="margin:0; font-size:1.05rem;">{p_sel.nombre} · {p_sel.id}</h4>
-                  <div style="font-size:0.82rem; color:#64748b;">{p_sel.descripcion}</div>
-                </div>
-                <div>
-                  {destino_asistencial_badge(d_sel.asignado_uci, d_sel.prioridad, d_sel.posicion_ranking)}
-                </div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        rep_sel = reportes_robustez.get(p_sel.id) if reportes_robustez else None
-        if rep_sel:
-            pct_s = rep_sel.porcentaje_estabilidad_decision
-            col_rb1, col_rb2 = st.columns([1, 3])
-            with col_rb1:
-                st.metric("Estabilidad Monte Carlo", f"{pct_s:.1f}%", delta=rep_sel.diagnostico_frontera,
-                          delta_color="normal" if pct_s >= 90.0 else "inverse")
-            with col_rb2:
-                st.info(f"**Directriz XAI:** {rep_sel.advertencia_clinica}")
-
-        vista_sel = st.radio(
-            "Formato de visualización:",
-            ["Cadena paso a paso estructurada", "Árbol de inferencia (Graphviz)", "Tabla de trazas crudas"],
-            horizontal=True,
-            key=f"vista_{p_sel.id}",
-        )
-
-        cadena_sel = resultado.cadena_xai(p_sel.id)
-
-        if vista_sel == "Cadena paso a paso estructurada":
-            for i, etapa_val in enumerate(x.value for x in Etapa):
-                trazas_etapa = [t for t in cadena_sel if t.etapa == etapa_val]
-                if not trazas_etapa:
-                    continue
-                st.markdown(f"**Etapa {i+1}: {etapa_val}**")
-                for t in trazas_etapa:
-                    render_traza_moderna(t)
-        elif vista_sel == "Árbol de inferencia (Graphviz)":
-            st.graphviz_chart(arbol_dot(resultado, p_sel.id), use_container_width=True)
-        else:
-            st.dataframe(pd.DataFrame([t.to_dict() for t in cadena_sel]), hide_index=True, use_container_width=True)
-
-    with st.expander("🌐 Ver trazas del sistema (Gestión global de recursos hospitalarios)", expanded=False):
+    with st.expander("Trazas globales del sistema (no asociadas a un paciente)"):
         for t in [t for t in resultado.todas_las_trazas() if t.paciente_id is None]:
-            render_traza_moderna(t)
+            render_traza(t)
 
-    # Descarga de Auditoría Médica
-    st.markdown("#### 💾 Exportación de Registro de Auditoría")
+    st.markdown("**Exportar auditoría**")
     traza_json = json.dumps({
-        "modo": resultado.modo,
-        "estado_hospital": resultado.estado_hospital,
-        "recursos": {
-            "camas_disponibles": estado.camas_uci_disponibles,
-            "ventiladores_disponibles": estado.ventiladores_disponibles,
-        },
+        "modo": resultado.modo, "estado_hospital": resultado.estado_hospital,
+        "recursos": {"camas_disponibles": estado.camas_uci_disponibles,
+                     "ventiladores_disponibles": estado.ventiladores_disponibles},
         "validacion_global": resultado.validacion_global,
         "decisiones": {pid: vars(d) for pid, d in resultado.decisiones.items()},
         "trazas": [t.to_dict() for t in resultado.todas_las_trazas()],
     }, ensure_ascii=False, indent=2)
+    dl1, dl2, _ = st.columns([1, 1, 1])
+    dl1.download_button("Auditoría completa (JSON)", traza_json, "auditoria_uci_xai.json", "application/json",
+                        icon=":material/download:", width="stretch")
+    dl2.download_button("Trazas de reglas (CSV)",
+                        pd.DataFrame([t.to_dict() for t in resultado.todas_las_trazas()]).to_csv(index=False)
+                        .encode("utf-8-sig"), "trazas_uci.csv", "text/csv",
+                        icon=":material/download:", width="stretch")
 
-    c_d1, c_d2 = st.columns(2)
-    c_d1.download_button("⬇️ Descargar Expediente de Auditoría (JSON)", traza_json, "auditoria_uci_xai.json", "application/json", use_container_width=True)
-    c_d2.download_button("⬇️ Descargar Trazas de Reglas (CSV)",
-                         pd.DataFrame([t.to_dict() for t in resultado.todas_las_trazas()]).to_csv(index=False).encode("utf-8-sig"),
-                         "trazas_uci.csv", "text/csv", use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# PESTAÑA · Nota clínica (NLG)
+# -----------------------------------------------------------------------------
+with tab_nota:
+    st.subheader("Nota para la historia clínica", anchor=False)
+    st.caption("Texto generado automáticamente a partir de las reglas del comité (Resolución 1995 de 1999, "
+               "Ley 23 de 1981, Ley 1751 de 2015). El médico puede editarlo antes de descargarlo.")
+
+    pid_nota = st.selectbox(
+        "Paciente", [p.id for p in ordenados], key="sel_paciente_nlg",
+        format_func=lambda pid: f"{por_id[pid].nombre} · {pid} · {resultado.evaluaciones[pid].etiqueta_prioridad}",
+    )
+    texto_nota = ClinicalNarrativeGenerator().generar_nota_historia_clinica(
+        pid_nota, resultado, reporte_robustez=reportes_robustez.get(pid_nota) if reportes_robustez else None,
+    )
+    nota_editada = st.text_area(
+        "Nota (editable)", value=texto_nota, height=420, key=f"txt_area_nlg_{pid_nota}",
+        help="Documento médico-legal en 7 secciones. Puede complementarse antes de guardarlo.",
+    )
+    n1, n2, n3 = st.columns(3)
+    n1.download_button("Descargar nota (.txt)", nota_editada.encode("utf-8"),
+                       f"nota_oficial_historia_clinica_{pid_nota}.txt", "text/plain",
+                       icon=":material/download:", width="stretch", type="primary")
+    n2.download_button("Exportar expediente (.md)", nota_editada.encode("utf-8"),
+                       f"expediente_comite_{pid_nota}.md", "text/markdown",
+                       icon=":material/download:", width="stretch")
+    with n3.popover("Copiar al portapapeles", icon=":material/content_copy:", width="stretch"):
+        st.caption("Use el ícono de copiar en la esquina del recuadro.")
+        st.code(nota_editada, language=None, wrap_lines=True, height=300)
 
 
-# =============================================================================
-# PESTAÑA 5 · Marco Normativo y Responsabilidad
-# =============================================================================
-with tab5:
-    st.markdown("### 📜 Marco Jurídico Colombiano y Matriz de Responsabilidad")
-    st.caption("Fundamentación legal, constitucional y bioética que rige el diseño de las reglas de inferencia y la auditoría del sistema.")
+# -----------------------------------------------------------------------------
+# PESTAÑA · Marco legal
+# -----------------------------------------------------------------------------
+with tab_leg:
+    st.subheader("Marco jurídico y responsabilidad", anchor=False)
+    st.caption("Normas colombianas e internacionales que fundamentan las reglas del sistema.")
 
-    col_leg1, col_leg2 = st.columns(2)
-    with col_leg1:
-        st.markdown(
-            """
-            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:16px; margin-bottom:14px;">
-              <h4 style="margin:0 0 8px 0; color:#0f172a; font-size:1rem;">🤝 Supervisión Humana Obligatoria (Ley 23 de 1981)</h4>
-              <p style="font-size:0.84rem; color:#475569; margin:0; line-height:1.45;">
-                El sistema actúa estrictamente como un <b>Sistema de Soporte a la Decisión Clínica (CDSS)</b>. 
-                El acto médico es indelegable y personal: el médico tratante y el Comité de Ética Asistencial conservan la 
-                autonomía profesional para acoger o apartarse motivadamente de la recomendación, con registro en la historia clínica 
-                (Resolución 1995 de 1999).
-              </p>
-            </div>
-            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:16px;">
-              <h4 style="margin:0 0 8px 0; color:#0f172a; font-size:1rem;">🔐 Privacidad y Datos Sensibles (Ley 1581 de 2012)</h4>
-              <p style="font-size:0.84rem; color:#475569; margin:0; line-height:1.45;">
-                Los datos de salud son sensibles. El motor de inferencia corre localmente sin transmisión de datos a APIs externas. 
-                La identidad del paciente nunca interviene en las funciones de evaluación clínica ni cálculo de puntajes.
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    l1, l2 = st.columns(2)
+    with l1.container(border=True, height="stretch"):
+        st.markdown("**:material/handshake: Supervisión humana (Ley 23 de 1981)**")
+        st.markdown("El sistema es un **apoyo a la decisión clínica (CDSS)**. El acto médico es personal e "
+                    "indelegable: el médico tratante y el Comité de Ética pueden apartarse motivadamente de la "
+                    "recomendación, dejando constancia en la historia clínica (Resolución 1995 de 1999).")
+    with l2.container(border=True, height="stretch"):
+        st.markdown("**:material/public: Ética de la IA (UNESCO 2021 y Marco Colombia)**")
+        st.markdown("Transparencia y explicabilidad (trazas sin cajas negras), equidad (bloqueo de edadismo con "
+                    "prueba contrafáctica REG-BIO-01), supervisión humana y rendición de cuentas (auditoría "
+                    "exportable).")
+    l3, l4 = st.columns(2)
+    with l3.container(border=True, height="stretch"):
+        st.markdown("**:material/lock: Datos sensibles (Ley 1581 de 2012)**")
+        st.markdown("Todo se procesa localmente, sin APIs externas. El nombre del paciente nunca interviene en "
+                    "la evaluación clínica ni en los puntajes.")
+    with l4.container(border=True, height="stretch"):
+        st.markdown("**:material/warning: Alcance y limitaciones**")
+        st.markdown("Prototipo académico. Las probabilidades de sobrevida por SOFA son aproximaciones pedagógicas "
+                    "y no están calibradas para uso clínico real. No reemplaza el juicio médico.")
 
-    with col_leg2:
-        st.markdown(
-            """
-            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:16px; margin-bottom:14px;">
-              <h4 style="margin:0 0 8px 0; color:#0f172a; font-size:1rem;">🌍 Ética de IA UNESCO (2021) y Marco Colombia</h4>
-              <p style="font-size:0.84rem; color:#475569; margin:0; line-height:1.45;">
-                Cumplimiento estricto de los 4 pilares: <b>Transparencia y Explicabilidad</b> (trazas simbólicas sin cajas negras), 
-                <b>Equidad</b> (bloqueo activo de edadismo mediante prueba contrafáctica REG-BIO-01), <b>Supervisión Humana</b> 
-                y <b>Rendición de Cuentas</b> con auditoría inmutable.
-              </p>
-            </div>
-            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:16px;">
-              <h4 style="margin:0 0 8px 0; color:#0f172a; font-size:1rem;">⚠️ Declaración de Alcance y Limitaciones</h4>
-              <p style="font-size:0.84rem; color:#475569; margin:0; line-height:1.45;">
-                Prototipo con fines docentes y de investigación académica. Las probabilidades de sobrevida basadas en SOFA corresponden 
-                a aproximaciones pedagógicas de la literatura médica y no deben emplearse para decisiones diagnósticas o terapéuticas reales.
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-
-    st.markdown("#### 🏛️ Matriz de Responsabilidad Civil y Profesional")
+    st.write("")
+    st.markdown("**Matriz de responsabilidad civil y profesional**")
     st.dataframe(pd.DataFrame([
-        {
-            "Actor": m["actor"],
-            "Responsabilidad": m["responsabilidad"],
-            "Régimen Jurídico": m["tipo"],
-            "Límite de Exclusión": m["no_responde_por"],
-        }
+        {"Actor": m["actor"], "Responsabilidad": m["responsabilidad"], "Régimen jurídico": m["tipo"],
+         "No responde por": m["no_responde_por"]}
         for m in kb.MATRIZ_RESPONSABILIDAD
-    ]), hide_index=True, use_container_width=True)
+    ]), hide_index=True, width="stretch")
 
-    st.markdown("#### 📜 Corpus Normativo Aplicado por las Reglas de Inferencia")
-    st.dataframe(pd.DataFrame([
-        {
-            "Norma": v["norma"],
-            "Contenido": v["contenido"],
-            "Aplicación Concreta en el Sistema": v["aplicacion"],
-        }
-        for v in kb.NORMATIVA.values()
-    ]), hide_index=True, use_container_width=True)
+    with st.expander(":material/menu_book: Normas aplicadas por las reglas"):
+        st.dataframe(pd.DataFrame([
+            {"Norma": v["norma"], "Contenido": v["contenido"], "Aplicación en el sistema": v["aplicacion"]}
+            for v in kb.NORMATIVA.values()
+        ]), hide_index=True, width="stretch")
 
-    st.markdown("#### 🔗 Trazabilidad en Vivo: Norma ↔ Reglas Disparadas en la Sesión")
-    conteo_norma: Dict[str, Dict[str, object]] = {}
-    for t in resultado.todas_las_trazas():
-        fila = conteo_norma.setdefault(t.regla_id, {
-            "Regla": t.regla_id,
-            "Agente": t.agente,
-            "Disparos": 0,
-            "Fundamento Normativo o Médico": t.fundamento_normativo_o_medico,
-        })
-        fila["Disparos"] = int(fila["Disparos"]) + 1
-    st.dataframe(pd.DataFrame(sorted(conteo_norma.values(), key=lambda f: str(f["Regla"]))), hide_index=True, use_container_width=True)
+    with st.expander(":material/link: Trazabilidad norma ↔ reglas disparadas en esta sesión"):
+        conteo: Dict[str, Dict[str, object]] = {}
+        for t in resultado.todas_las_trazas():
+            fila = conteo.setdefault(t.regla_id, {"Regla": t.regla_id, "Agente": t.agente, "Disparos": 0,
+                                                  "Fundamento": t.fundamento_normativo_o_medico})
+            fila["Disparos"] = int(fila["Disparos"]) + 1
+        st.dataframe(pd.DataFrame(sorted(conteo.values(), key=lambda f: str(f["Regla"]))),
+                     hide_index=True, width="stretch")

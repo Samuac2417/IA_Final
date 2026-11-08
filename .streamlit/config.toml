@@ -1,0 +1,31 @@
+# Tema visual de la consola de Triage Ético UCI.
+# Paleta clara y de bajo contraste (inspirada en interfaces hospitalarias modernas):
+# fondo blanco, superficies gris-azuladas muy suaves y un color primario verde azulado
+# ("teal" clínico) reservado para acciones principales.
+
+[theme]
+base = "light"
+primaryColor = "#0E7C7B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F7F9"
+textColor = "#1E293B"
+linkColor = "#0E7C7B"
+borderColor = "#E3E8EE"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
+baseFontSize = 15
+font = "sans-serif"
+headingFont = "sans-serif"
+showSidebarBorder = true
+dataframeHeaderBackgroundColor = "#F4F7F9"
+
+[theme.sidebar]
+backgroundColor = "#F7FAFB"
+secondaryBackgroundColor = "#FFFFFF"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
