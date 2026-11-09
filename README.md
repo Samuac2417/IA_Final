@@ -1,5 +1,8 @@
 # Sistema Experto Multiagente para el Triage Médico y Asignación Ética de Recursos Críticos (UCI)
 
+> 📹 **Video Demostrativo del Proyecto:**  
+> [Ver Video de Presentación y Sustentación en Google Drive](https://drive.google.com/drive/folders/1VOjNUTzw3C2cpvuvEHLczizwFb67fOD8?usp=drive_link)
+
 **Institución:** Universidad Católica Luis Amigó  
 **Curso:** Análisis de Inteligencia Artificial  
 **Proyecto:** Sistema de Soporte a la Decisión Clínica (CDSS) Simbólico y Explicable (XAI)  
